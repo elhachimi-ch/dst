@@ -1,21 +1,29 @@
-import numpy as np
 import time
-from numpy.linalg import matrix_power
-from nltk.corpus import stopwords
 from dataframe import DataFrame
-from vectorizer import Vectorizer, stemming
 from model import Model
-from chart import Chart
-import pandas as pd
-from lib import *
-
-def efficiency(o):
-    return o/1.501
 
 def main():
     ti = time.time()
     
-    print(time.time() - ti)
+    data = DataFrame()
+    data.load_dataset('iris')
+    y =  data.get_column('target')
+    data.drop_column('target')
     
+    # decision tree model
+    model = Model(data_x=data.get_dataframe(), data_y=y, model_type='dt', training_percent=0.8)
+    
+    # train the model
+    model.train()
+    
+    # get all classification evaluation metrics
+    model.report()
+    
+    #get the cross validation
+    model.cross_validation(5)
+   
+    print(time.time() - ti)
+
+
 if __name__ == '__main__':
     main()
