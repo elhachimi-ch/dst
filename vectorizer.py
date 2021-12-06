@@ -4,7 +4,6 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 import joblib
 from tensorflow.keras.utils import to_categorical
 from lib import *
-from tashaphyne.stemming import ArabicLightStemmer
 from sklearn.preprocessing import MinMaxScaler
 import nltk
 

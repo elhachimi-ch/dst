@@ -8,7 +8,6 @@ import lib
 from dataframe import DataFrame
 from vectorizer import Vectorizer, stemming
 from model import Model
-from rl import *
 from chart import Chart
 import pandas as pd
 from lib import *
