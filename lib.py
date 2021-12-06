@@ -5,8 +5,6 @@ import re
 from os import listdir
 from os.path import isfile, join
 import math
-from textblob import TextBlob
-from pycountry_convert import country_name_to_country_alpha3
 
 def write_liste_csv(liste_ligne_csv, file_name='data/out.csv', delimiter=',', quotechar='`'):
     f = open(file_name, 'w+', newline='', encoding='utf-8')
@@ -141,7 +139,6 @@ def to_upper_file_text(path_source, path_destination):
         la.append(line.upper())
     write_liste_in_file(path_destination, la)
 
-
 def write_line_in_file(line, path='data/latin_comments.csv', with_anti_slash=True):
     f = open(path, "a+", encoding='utf-8')
 
@@ -184,14 +181,3 @@ def read_csv(file_path, delimiter=','):
     f = open(file_path, 'r+', encoding='utf-8')
     reader = csv.reader(f, delimiter=delimiter)
     return reader
-
-def detect_lang(text):
-    return TextBlob(text).detect_language()
-
-def country_name_to_iso3(o):
-    iso = o
-    try:
-        iso = country_name_to_country_alpha3(o)
-    except KeyError:
-        return iso
-    return iso
