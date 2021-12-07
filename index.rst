@@ -1,72 +1,18 @@
-dst package
-===========
+.. DST documentation master file, created by
+   sphinx-quickstart on Tue Dec  7 17:30:07 2021.
+   You can adapt this file completely to your liking, but it should at least
+   contain the root `toctree` directive.
 
-Submodules
-----------
+Welcome to DST's documentation!
+===============================
 
-dst.chart module
-----------------
+.. includes:: dst.rst
 
-.. automodule:: chart
-   :members:
-   :undoc-members:
-   :show-inheritance:
 
-dst.dataframe module
---------------------
 
-.. automodule:: dataframe
-   :members:
-   :undoc-members:
-   :show-inheritance:
+Indices and tables
+==================
 
-dst.gis module
---------------
-
-.. automodule:: gis
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-dst.imagefactory module
------------------------
-
-.. automodule:: imagefactory
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-dst.kitchen module
-------------------
-
-.. automodule:: kitchen
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-dst.lib module
---------------
-
-.. automodule:: lib
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-dst.model module
-----------------
-
-.. automodule:: model
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-dst.vectorizer module
----------------------
-
-.. automodule:: vectorizer
-   :members:
-   :undoc-members:
-   :show-inheritance:
-
-Module contents
----------------
+* :ref:`genindex`
+* :ref:`modindex`
+* :ref:`search`
