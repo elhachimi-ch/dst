@@ -37,6 +37,19 @@ class Model:
         generator=None,
         validation_percentage=0.2
         ):
+        """[summary]
+
+        Args:
+            data_x ([type], optional): dataframe of estimators features. Defaults to None.
+            data_y ([type], optional): dataframe of target features to be estimated. Defaults to None.
+            model_type (str, optional): machine learning model to use (knn, dt -> decision tree, rf -> random forest, etc). Defaults to 'knn'.
+            c_or_r_or_ts (str, optional): task type (classification, reression or time series forecasting). Defaults to 'c'.
+            training_percent (int, optional): percent to be used in data spliting for training part. Defaults to 1.
+            epochs (int, optional): number of epochs. Defaults to 50.
+            batch_size (int, optional): Defaults to 32.
+            generator (data generator, optional): provide the data as a generator function. Defaults to None.
+            validation_percentage (float, optional): percent to be used in data spliting for validation part. Defaults to 0.2.
+        """
         
         if training_percent != 1:
             self.__x_train, self.__x_test, self.__y_train, self.__y_test = train_test_split(data_x, 
@@ -201,14 +214,38 @@ class Model:
         
     # banary classification
     def predict(self, x_to_pred):
+        """Make a new prediction using the trained model
+
+        Args:
+            x_to_pred (matrix): list of rows or instances to predict
+
+        Returns:
+            reel: predicted value
+        """
         return self.__model.predict(x_to_pred)
     
     def forcast_next_step(self, window):
+        """Forecasting of one step in a time series using the trained model
+
+        Args:
+            window ([type]): [description]
+
+        Returns:
+            reel: forecasted value
+        """
         current_batch = window.reshape((1, window.shape[0], 1))
         # One timestep ahead of historical 12 points
         return self.predict(current_batch)[0]
 
     def predict_proba(self, x_to_pred):
+        """Predict a probability distribution
+
+        Args:
+            x_to_pred (matrix): list of rows or instances to predict
+
+        Returns:
+            list: an array of probability distributions
+        """
         return self.__model.predict_proba(x_to_pred)
 
     def accuracy(self):
@@ -226,10 +263,15 @@ class Model:
         return f1_score(self.__y_test, self.__y_pred)
 
     def regression_report(self, y_test=None, y_predicted=None): 
-        """
-        pass y_test and y_predected as pandas serie is get_column
-        """
+        """Calculate regression metrics by passing y_test and y_predicted
         
+        Args:
+            y_test ([type], optional): column of reel values. Defaults to None.
+            y_predicted ([type], optional): column of predicted values. Defaults to None.
+
+        Returns:
+            (dict): a dictionary of regression metrics
+        """
         if y_test is not None and y_predicted is not None:
             self.__y_test = y_test
             self.__y_pred = y_predicted
@@ -243,8 +285,14 @@ class Model:
         }
         
     def classification_report(self, y_test=None, y_predicted=None): 
-        """
-        pass y_test and y_predected as pandas serie is get_column
+        """Calculate classification metrics by passing y_test and y_predicted
+        
+        Args:
+            y_test ([type], optional): column of reel values. Defaults to None.
+            y_predicted ([type], optional): column of predicted values. Defaults to None.
+
+        Returns:
+            (dict): a dictionary of classification metrics
         """
         if y_test is not None and y_predicted is not None:
             self.__y_test = y_test
@@ -280,6 +328,8 @@ class Model:
         self.__model = load(model_path)
 
     def report(self):
+        """Ploting the chart of accuracy and loss over epochs
+        """
         if self.__model_type == 'dl':
             if self.__c_or_r_ts == 'ts' or self.__c_or_r_ts == 'r':
                 if self.__validation_percentage == 0:
@@ -337,8 +387,12 @@ class Model:
             else:
                 print(self.classification_report()) 
                 
-    def cross_validation(self, k):
-        """https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter"""
+    def cross_validation(self, k=7):
+        """perform a cross validation for the trained model
+        for more metrics: https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
+        Args:
+            k (in): number of folds
+        """
         # scoring = "neg_mean_squared_error"
         if self.__c_or_r_ts == 'r':
             scoring = "r2"
@@ -347,6 +401,11 @@ class Model:
         print(cross_val_score(self.__model, self.x, self.y, cv=k, scoring=scoring))
         
     def get_features_importance(self):
+        """calculate the importance vector as a Feature selection task onn te data_x and show the result as bar chart
+
+        Returns:
+            ndarray: feature importance vector
+        """
         if self.__c_or_r_ts == 'r':
             etr_model = ExtraTreesRegressor()
             etr_model.fit(self.x,self.y)
