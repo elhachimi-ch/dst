@@ -1,4 +1,4 @@
-# PyGitHub
+# Data Science Toolkit
 
 [![PyPI](https://img.shields.io/pypi/v/PyGithub.svg)](https://pypi.python.org/pypi/PyGithub)
 ![CI](https://github.com/PyGithub/PyGithub/workflows/CI/badge.svg)
