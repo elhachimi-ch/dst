@@ -7,7 +7,7 @@ Submodules
 dst.chart module
 ----------------
 
-.. automodule:: dst.chart
+.. automodule:: chart
    :members:
    :undoc-members:
    :show-inheritance:

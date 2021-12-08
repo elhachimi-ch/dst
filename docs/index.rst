@@ -6,7 +6,7 @@
 Welcome to DST's documentation!
 ===============================
 
-.. includes:: dst.rst
+.. include:: dst.rst
 
 
 
