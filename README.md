@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/PyGithub.svg)](https://pypi.python.org/pypi/PyGithub)
 [![readthedocs](https://img.shields.io/badge/docs-latest-brightgreen.svg?style=flat)](https://data-science-toolkit.readthedocs.io)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Reproducible Capsule](https://img.shields.io/static/v1?label=&message=code ocean&color=blue)](https://codeocean.com/capsule/1309232/tree)
+[![Reproducible Capsule](https://img.shields.io/static/v1?label=&message=code+ocean&color=blue)](https://codeocean.com/capsule/1309232/tree)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 Data Science Toolkit (DST) is a Python library that helps implement data science related project with ease.
