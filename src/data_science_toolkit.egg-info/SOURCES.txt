@@ -1,0 +1,8 @@
+LICENSE
+README.md
+pyproject.toml
+setup.cfg
+src/data_science_toolkit.egg-info/PKG-INFO
+src/data_science_toolkit.egg-info/SOURCES.txt
+src/data_science_toolkit.egg-info/dependency_links.txt
+src/data_science_toolkit.egg-info/top_level.txt

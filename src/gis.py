@@ -4,7 +4,7 @@ import sys
 import math
 from numpy.linalg import matrix_power
 import nltk
-import lib
+import lib as lib
 from dataframe import DataFrame
 from vectorizer import Vectorizer, stemming
 from model import Model

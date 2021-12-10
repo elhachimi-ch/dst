@@ -1,10 +1,14 @@
 import time
-from dataframe import DataFrame
+import os
+import sys
+sys.path.insert(0, os.path.abspath('../src/'))
+from src.dataframe import DataFrame
 from model import Model
+import data_science_toolkit as dst
 
 def main():
     ti = time.time()
-    
+    ss = dst.DataFrame()
     data = DataFrame()
     data.load_dataset('iris')
     y =  data.get_column('target')

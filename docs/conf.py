@@ -15,11 +15,11 @@ import sys
 sys.path.insert(0, os.path.abspath('..'))
 
 import dataframe
-import model
-import lib
-import chart
-import gis
-import imagefactory
+import src.model as model
+import src.lib as lib
+import src.chart as chart
+import src.gis as gis
+import src.imagefactory as imagefactory
 
 # -- Project information -----------------------------------------------------
 
