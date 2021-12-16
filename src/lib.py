@@ -10,6 +10,9 @@ class Lib:
     """ Lib class is a static class that serves other components with implementations of auxiliary algorithms . 
     """
     
+    def __init__(self):
+        return 0
+    
     @staticmethod
     def write_list_as_csv(liste_ligne_csv, file_name='data/out.csv', delimiter=',', quotechar='`'):
         """[summary]

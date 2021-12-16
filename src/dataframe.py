@@ -7,8 +7,8 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import MinMaxScaler
-from lib import *
-from vectorizer import Vectorizer
+from .lib import Lib
+from .vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import minmax_scale
