@@ -239,9 +239,13 @@ class Lib:
         return str == str[::-1]
     
     @staticmethod
-    def most_frequent(list):
-        return max(set(list), key=list.count)
+    def most_frequent(list_in):
+        return max(set(list_in), key=list.count)
     
     @staticmethod
     def is_anagram(string1, string2):
         return Counter(string1) == Counter(string2)
+    
+    @staticmethod
+    def remove_duplicate(list_in):
+        return list(set(list_in))
