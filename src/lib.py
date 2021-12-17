@@ -5,6 +5,7 @@ import re
 from os import listdir
 from os.path import isfile, join
 import math
+from collections import Counter
 
 class Lib:
     """ Lib class is a static class that serves other components with implementations of auxiliary algorithms . 
@@ -236,3 +237,11 @@ class Lib:
     @staticmethod
     def is_palindrome(str):
         return str == str[::-1]
+    
+    @staticmethod
+    def most_frequent(list):
+        return max(set(list), key=list.count)
+    
+    @staticmethod
+    def is_anagram(string1, string2):
+        return Counter(string1) == Counter(string2)
