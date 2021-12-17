@@ -232,3 +232,7 @@ class Lib:
         f = open(file_path, 'r+', encoding='utf-8')
         reader = csv.reader(f, delimiter=delimiter)
         return reader
+    
+    @staticmethod
+    def is_palindrome(str):
+        return str == str[::-1]

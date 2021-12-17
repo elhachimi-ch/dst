@@ -8,7 +8,6 @@ import data_science_toolkit as dst
 
 def main():
     ti = time.time()
-    ss = dst.DataFrame()
     data = DataFrame()
     data.load_dataset('iris')
     y =  data.get_column('target')
