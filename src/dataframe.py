@@ -7,18 +7,18 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
 from sklearn.preprocessing import MinMaxScaler
-from .lib import Lib
-from .vectorizer import Vectorizer
+from lib import *
+from vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import minmax_scale
 from sklearn.compose import ColumnTransformer
 from keras.preprocessing.sequence import TimeseriesGenerator as SG
 from sklearn.datasets import load_iris, load_boston
-import numpy as np
+
 
 class DataFrame:
-    """DataFrame class for dealing with exploratry data analysis and data preprocessing
+    """
     """
     __vectorizer = None
     __generator = None
@@ -58,25 +58,12 @@ class DataFrame:
             self.__dataframe = pd.DataFrame()
         
     def get_generator(self):
-        """
-
-        Returns:
-            (generator): return the data generator build using the dataframe
-        """
         return self.__generator
     
     def get_index(self):
         return self.__dataframe.index.to_list()
     
     def add_time_serie_row(self, date_column, value_column, value, date_format='%Y'):
-        """[summary]
-
-        Args:
-            date_column (str): The column containing the date
-            value_column (str): The column containing values of the time series
-            value ([type]): new value to add
-            date_format (str, optional): The RegEx patern of date format. Defaults to '%Y'.
-        """
         last_date = self.get_index()[-1] + timedelta(days=1)
         dataframe = DataFrame([{value_column: value, date_column: last_date}], file_type='dict')
         dataframe.to_time_series(date_column, value_column, one_row=True, date_format=date_format)
@@ -94,14 +81,6 @@ class DataFrame:
             self.__dataframe = data
 
     def get_data_types(self, show=True):
-        """[summary]
-
-        Args:
-            show (bool, optional): if True printing the dataframe in console. Defaults to True.
-
-        Returns:
-            list: a list of data types of all columns in the dataframe
-        """
         types = self.get_dataframe().dtypes
         if show:
             print(types)
@@ -118,14 +97,6 @@ class DataFrame:
             self.set_column_type(p, same_type)
 
     def describe(self, show=True):
-        """[summary]
-
-        Args:
-            show (bool, optional): if True printing the dataframe in console. Defaults to True.
-
-        Returns:
-            [type]: [description]
-        """
         description = self.get_dataframe().describe()
         if show:
             print(description)
@@ -144,11 +115,6 @@ class DataFrame:
         return ' '.join(list(self.get_column(column)))
 
     def get_term_doc_matrix_as_df(self, vectorizer_type='count'):
-        """Build a term matrix document from a text column
-
-        Args:
-            vectorizer_type (str, optional): weighing scheme to use. Defaults to 'count'.
-        """
         corpus = list(self.get_column('comment'))
         indice = ['doc' + str(i) for i in range(len(corpus))]
         v = Vectorizer(corpus, vectorizer_type=vectorizer_type)
@@ -184,13 +150,8 @@ class DataFrame:
         return self.get_dataframe().iloc[lines, columns]
     
     def get_n_rows_as_dataframe(self, number_of_row=10):
-        """return n rows as new dataframe: give a negative value if you want begin from last row
-
-        Args:
-            number_of_row (int, optional): Defaults to 10.
-
-        Returns:
-            (dataframe): the new dataframe
+        """
+        give a negative value if you want begin from last row
         """
         if number_of_row < 0:
             return self.get_dataframe().tail(abs(number_of_row))
@@ -201,12 +162,6 @@ class DataFrame:
         return self.get_dataframe()[column]
 
     def rename_columns(self, column_dict_or_all_list, all_columns=False):
-        """[summary]
-
-        Args:
-            column_dict_or_all_list (dictionary or list): dictionary of new column names or a list of all columns names
-            all_columns (bool, optional): [description]. Defaults to False.
-        """
         if all_columns is True:
             types = {}
             self.__dataframe.columns = column_dict_or_all_list
@@ -217,17 +172,12 @@ class DataFrame:
             self.get_dataframe().rename(columns=column_dict_or_all_list, inplace=True)
 
     def add_column(self, column, column_name):
-        """add a new column to the dataframe
-
-        Args:
-            column (Series, ndarray or a list): column to be added
-            column_name (str): name of new added column
-        """
         y = column
         if (not isinstance(column, pd.core.series.Series or not isinstance(column, pd.core.frame.DataFrame))):
             y = np.array(column)
             y = np.reshape(y, (y.shape[0],))
             y = pd.Series(y)
+            print(y)
         self.__dataframe[column_name] = y
 
     def get_dataframe(self):
@@ -275,11 +225,6 @@ class DataFrame:
         self.set_dataframe(self.get_dataframe().groupby(column).count())
         
     def check_missed_data(self, column=None):
-        """Retrning statistics about missing data
-
-        Args:
-            column (str, optional): column name to check if None take all column in concidiration. Defaults to None.
-        """
         if column is not None:
             if any(pd.isna(self.get_dataframe()[column])) is True:
                 print("Missed data found in column " + column)
@@ -296,12 +241,6 @@ class DataFrame:
                     print("{} has NO missing value!".format(c))
 
     def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None):
-        """Filling missing data
-
-        Args:
-            filling_dict_colmn_val (dict, optional): dictionary of missing values mapping. Defaults to None.
-            drop_row_if_nan_in_column (str, optional): delete the entire row if NaN is found in this column. Defaults to None.
-        """
         if drop_row_if_nan_in_column is not None:
             # a = a[~(np.isnan(a).all(axis=1))] # removes rows containing all nan
             self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
@@ -349,36 +288,17 @@ class DataFrame:
         self.__dataframe = pd.merge(self.__dataframe, dataframe, on=column, how='right')
 
     def eliminate_outliers_neighbors(self, n_neighbors=20, contamination=.05):
-        """Delete outliers from the dataframe based on number of neighbors
-
-        Args:
-            n_neighbors (int, optional): . Defaults to 20.
-            contamination (float, optional): . Defaults to .05.
-        """
         outliers = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination)
         self.__dataframe['inlier'] = outliers.fit_predict(self.get_dataframe())
         self.__dataframe = self.get_dataframe().loc[self.get_dataframe().inlier == 1,
                                                       self.get_dataframe().columns.tolist()]
 
     def get_pca(self, new_dim):
-        """Apply PCA method to the dataframe
-
-        Args:
-            new_dim (int):  dimensions of new dataframe i.e number of features
-
-        Returns:
-            [type]: [description]
-        """
         # pca.explained_variance_ratio_ gain d'info pour chaque vecteur
         pca_model = PCA(n_components=new_dim)
         return pca_model.fit_transform(self.get_dataframe())
 
     def get_centre_reduite(self):
-        """Standar scaler
-
-        Returns:
-            dataframe: scaled dataframe
-        """
         sc = StandardScaler()
         return sc.fit_transform(X=self.get_dataframe())
     
@@ -394,22 +314,14 @@ class DataFrame:
     def s__column_to_min_max_scale(self, column):
         self.set_column(column, minmax_scale(self.get_column(column)))
         
-    def column_to_min_max_scale(self, column_name):
-        """Apply min/max scale to a column
-
-        Args:
-            column_name (str): name of the column to scale
-
-        Returns:
-            series: new scaled column
-        """
+    def column_to_min_max_scale(self, column):
         self.__vectorizer = MinMaxScaler() 
         dataframe_copy = self.get_dataframe()
-        self.keep_columns([column_name])
+        self.keep_columns([column])
         self.__vectorizer.fit(self.get_dataframe())
         scaled_column = self.__vectorizer.transform(self.get_dataframe())
         self.set_dataframe(dataframe_copy)
-        self.set_column(column_name, scaled_column)
+        self.set_column(column, scaled_column)
         return scaled_column
     
     def get_min_max_scaled_columns(self, columns_names_as_list):
@@ -463,29 +375,19 @@ class DataFrame:
         for p in self.get_dataframe().values:
             write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
 
-    def filter_dataframe(self, column_name, decision_function, in_place=True, *args):
-        """[summary]
-
-        Args:
-            column_name (str): name of the column to filter
-            decision_function (function): function that take in parameter a row and check a condition upon it
-            in_place (bool, optional): if True apply the decision function to inner dataframe. Defaults to True.
-
-        Returns:
-            dataframe: filtred dataframe
-        """
+    def filter_dataframe(self, column, func_de_decision, in_place=True, *args):
         if in_place is True:
             if len(args) == 2:
                 self.set_dataframe(
-                    self.get_dataframe().loc[self.get_column(column_name).apply(decision_function, args=(args[0], args[1]))])
+                    self.get_dataframe().loc[self.get_column(column).apply(func_de_decision, args=(args[0], args[1]))])
             else:
                 self.set_dataframe(
-                    self.get_dataframe().loc[self.get_column(column_name).apply(decision_function)])
+                    self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)])
         else:
             if len(args) == 2:
-                return self.get_dataframe().loc[self.get_column(column_name).apply(decision_function, args=(args[0], args[1]))]
+                return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision, args=(args[0], args[1]))]
             else:
-                return self.get_dataframe().loc[self.get_column(column_name).apply(decision_function)]
+                return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)]
 
     def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, *args):
         if (len(args) != 0):
@@ -518,56 +420,38 @@ class DataFrame:
     def reverse_column_from_numerical_values(self, column, maping):
         self.trasform_column(column, column, lambda o : maping[int(o)])
 
-    def count_occurence_of_row_as_count_column(self, column_name):
-        """Calculate the occurrence of each row in the dataframe as a new column
-
-        Args:
-            column_name (str): name of destination column
-        """
-        new_column_name = 'count'
-        print(self.get_column(column_name).value_counts())
-        self.set_column(new_column_name, self.get_column(column_name).value_counts())
-        self.trasform_column(new_column_name, column_name, lambda x:self.get_column(column_name).value_counts().get(x))
+    def count_occurence_of_row_as_count_column(self, column):
+        column_name = 'count'
+        print(self.get_column(column).value_counts())
+        self.set_column(column_name, self.get_column(column).value_counts())
+        self.trasform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
     
-    def get_count_number_of_all_words(self, column_name):
-        self.apply_fun_to_column(column_name, lambda x: len(x.split(' ')))
-        return self.get_column(column_name).sum()
+    def get_count_number_of_all_words(self, column):
+        self.apply_fun_to_column(column, lambda x: len(x.split(' ')))
+        return self.get_column(column).sum()
     
-    def get_count_occurrence_of_a_value(self, column_name, value, case_sensitive=True):
-        """Count the occurrence of a value in a given column
-
-        Args:
-            column_name (str): name of destination column
-            value (any): The value to be counted
-            case_sensitive (bool, optional): in case of textual data take in concidiration the case sensitive. Defaults to True.
-
-        Returns:
-            int: the occurrence number
-        """
+    def get_count_occurrence_of_value(self, column, value, case_sensitive=True):
+        
         if case_sensitive:
-            self.apply_fun_to_column(column_name, lambda x: x.split(' ').count(value))
-            return self.get_column(column_name).sum()
+            self.apply_fun_to_column(column, lambda x: x.split(' ').count(value))
+            return self.get_column(column).sum()
         else:
-            self.apply_fun_to_column(column_name, lambda x: list(map(str.lower, x.split(' '))).count(value))
-            return self.get_column(column_name).sum()
+            self.apply_fun_to_column(column, lambda x: list(map(str.lower, x.split(' '))).count(value))
+            return self.get_column(column).sum()
 
     def count_true_decision_function_rows(self, column, decision_function):
         self.filter_dataframe(column, decision_function)
         print(self.get_shape()[0])
         
-    def show_wordcloud(self, column_name):
-        """Build the WordCloud of a textual column
-
-        Args:
-            column_name (str): name of destination column
-        """
+    def show_wordcloud(self, column):
         wordcloud = WordCloud(
             background_color='white',
             max_words=100,
             max_font_size=30,
             scale=3,
             random_state=1)
-        wordcloud = wordcloud.generate(self.get_column_as_joined_text(column_name))
+   
+        wordcloud = wordcloud.generate(self.get_column_as_joined_text(column))
         fig = plt.figure(1, figsize=(12, 12))
         plt.axis('off')
         plt.imshow(wordcloud)
@@ -599,6 +483,37 @@ class DataFrame:
             return self.get_dataframe().sample(n=frac)
         return self.get_dataframe().sample(n=n)
 
+    """
+    filter lines == WHERE
+    print(data.get_dataframe().loc[data.get_dataframe().Gender == 'H', 'Name']) nom des gen qui ont Gender  == 'H'
+    data.set_column('Gender', data.get_column('Gender').apply(okkk)) 
+    def okkk(o):
+    if o == '0':
+        return 'OKK'
+    return 'NOK'
+    print(data.get_dataframe().loc[data.get_dataframe().Gender == 'H', 'Name'])
+    data.set_column('Gender', data.get_column('Gender').apply(okkk)) select en respectant la fun okkk
+    if o == '0':
+        return True
+    return False
+
+    filter = data["Age"]=="Twenty five"
+
+    # printing only filtered columns 
+    data.where(filter).dropna() 
+    
+    
+    
+    In [13]: df.iloc[0]  # first row in a DataFrame
+    Out[13]: 
+    A    1
+    B    2
+    Name: a, dtype: int64
+    
+    In [14]: df['A'].iloc[0]  # first item in a Series (Column)
+    Out[14]: 1
+    """
+
     def show(self, number_of_row=None):
         if number_of_row is None:
             print(self.get_dataframe())
@@ -616,7 +531,7 @@ class DataFrame:
 
     def scale_column(self, column):
         max_column = self.get_column(column).describe()['max']
-        self.trasform_column(column, column, self.scale_trasform_fun, max_column)
+        self.transform_column(column, column, self.scale_trasform_fun, max_column)
 
     def drop_duplicated_rows(self, column):
         self.set_dataframe(self.__dataframe.drop_duplicates(subset=column, keep='first'))
@@ -657,31 +572,78 @@ class DataFrame:
             self.set_dataframe(self.__dataframe.resample(frequency).mean())
         return 0
         
-    def to_time_series(self, date_column_name, value_column_name, date_format='%Y-%m-%d', window_size=2, one_row=False):
-        """Convert a dataframe to a time series
-
-        Args:
-            date_column_name (str): The column containing the date
-            value_column (str): The column containing values
-            date_format (str, optional): date pattern. Defaults to '%Y-%m-%d'.
-            window_size (int, optional): length of the window. Defaults to 2.
-            one_row (bool, optional): [description]. Defaults to False.
-
-        Returns:
-            data generator: generated data
-        """
-        self.column_to_date(date_column_name, format=date_format)
-        self.reindex_dataframe(self.get_column(date_column_name))
-        self.keep_columns(value_column_name)
+    def to_time_series(self, date_column, value_column, date_format='%Y-%m-%d', window_size=2, one_row=False):
+        # when working with train test generators
+        """def to_time_series_generators(self, date_column, time_series_column, date_format='%Y-%m-%d', window_size=2, train_percent=0.8):
+        self.column_to_date(date_column, format=date_format)
+        self.reindex_dataframe(self.get_column(date_column))
+        self.drop_column(date_column)
+        #dataframa.asfreq('d') # h hourly w weekly d normal daily b business day  m monthly a annualy
+        train, test = self.train_test_split_column(time_series_column, 0.8)
+        self.set_train_generator(TimeseriesGenerator(np.reshape(train.values,
+                                                          (len(train),1)),
+                                               np.reshape(train.values,
+                                                          (len(train),1)),
+                                               length=window_size,
+                                               batch_size=1,
+                                               ))
+        self.set_test_generator(TimeseriesGenerator(np.reshape(test.values,
+                                                          (len(test),1)),
+                                               np.reshape(test.values,
+                                                          (len(test),1)),
+                                               length=window_size,
+                                               batch_size=1,
+                                               ))
+        return self.get_train_generator(), self.get_test_generator()"""
+        self.column_to_date(date_column, format=date_format)
+        self.reindex_dataframe(self.get_column(date_column))
+        self.keep_columns(value_column)
         if one_row is False:
             #dataframa.asfreq('d') # h hourly w weekly d normal daily b business day  m monthly a annualy
             self.set_generator(SG(self.get_min_max_scaled_dataframe(),
                                                 self.get_min_max_scaled_dataframe(),
                                                 length=window_size,
                                                 batch_size=1,))
-            
+            """self.set_generator(
+                TimeseriesGenerator(self.get_min_max_scaled_dataframe(), 
+                                    self.get_min_max_scaled_dataframe(), 
+                                    length=window_size, 
+                                    length_output=7, 
+                                    batch_size=1)"""
             return self.get_generator()
     
+    def drop_rows(self, nbr_rows=1):
+        """Drop the first nbr_rows of rows from the dataframe
+
+        Args:
+            nbr_rows (int, optional): if negative value is given then thelen the last nbr_rows. Defaults to 1.
+
+        Returns:
+            None
+        """
+        
+        if nbr_rows < 0:
+            self.set_dataframe(self.get_dataframe().iloc[:self.get_shape()[0]-nbr_rows])
+        else:
+            self.set_dataframe(self.get_dataframe().iloc[nbr_rows:])
+            
+    def drop_rows_by_indices(self, indexes_as_list=[0]):
+        """Drop rows given their indexes
+
+        Args:
+            indexes_as_list (list, optional): [description]. Defaults to [0].
+        """
+        self.set_dataframe(self.get_dataframe().drop(indexes_as_list))
+        
+    def dataframe_skip_columns(self, intitial_index, final_index, step=2):
+        self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:step])
+        
+    def shuffle_dataframe(self):
+        """
+        Shuffle the dataframe
+        """
+        self.set_dataframe(self.get_dataframe().sample(frac=1).reset_index(drop=True))
+        
     def load_dataset(self, dataset='iris'):
         """
         boston: Load and return the boston house-prices dataset (regression)
