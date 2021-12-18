@@ -160,6 +160,9 @@ class DataFrame:
 
     def get_column(self, column):
         return self.get_dataframe()[column]
+    
+    def get_columns(self, columns_names_as_list):
+        return self.get_dataframe()[columns_names_as_list]
 
     def rename_columns(self, column_dict_or_all_list, all_columns=False):
         if all_columns is True:
@@ -258,8 +261,8 @@ class DataFrame:
     def replace_num_data(self, val, replacement):
         self.get_dataframe().replace(val, replacement, inplace=True)
 
-    def map_function(self, func):
-        self.__dataframe = self.get_dataframe().applymap(func)
+    def map_function(self, func, **kwargs):
+        self.__dataframe = self.get_dataframe().applymap(func, **kwargs)
 
     def apply_fun_to_column(self, column, func, in_place=True):
         if in_place is True:
@@ -270,10 +273,16 @@ class DataFrame:
     def convert_column_type(self, column, new_type):
         self.set_column(column, self.get_column(column).astype(new_type))
 
-    def union(self, dataframe):
-        # conacatener deux dataframe avec column pas unique
-        self.__dataframe = pd.concat([self.get_dataframe(), dataframe], axis=1)
+    def concatinate(self, dataframe, ignore_index=False):
+        """conacatenate horizontally two dataframe
 
+        Args:
+            dataframe (dataframe): the destination dataframe 
+            ignore_index (bool, optional): If True, do not use the index values along the concatenation axis. Defaults to True.
+        """
+        # 
+        self.__dataframe = pd.concat([self.get_dataframe(), dataframe], axis=1, ignore_index=ignore_index)
+    
     def append_dataframe(self, dataframe):
         # append dataset contents data_sets must have the same columns names
         self.__dataframe = self.__dataframe.append(dataframe)
@@ -639,10 +648,67 @@ class DataFrame:
         self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:step])
         
     def shuffle_dataframe(self):
-        """
-        Shuffle the dataframe
-        """
         self.set_dataframe(self.get_dataframe().sample(frac=1).reset_index(drop=True))
+        
+    def scale_columns(self, columns_names_as_list, scaler_type='min_max', in_place=True):
+        """A method  to standardize the independent features present in the concerned columns in a fixed range.
+
+        Args:
+            column_name ([type]): 
+            scaler_type (str, optional): ['min_max', 'standard', 'adjusted_log']. Defaults to 'min_max'.
+            in_place (bool, optional): if False the modification do not  affects the original columns. Defaults to True.
+        """
+        if scaler_type == 'min_max':
+            self.__vectorizer = MinMaxScaler() 
+            dest_columns = self.get_columns(columns_names_as_list)
+            dest_dataframe = DataFrame(self.__vectorizer.fit_transform(X=dest_columns), 
+                                       line_index=self.get_index(),
+                                       columns_names_as_list=columns_names_as_list, 
+                                       file_type='matrix')
+            self.drop_columns(columns_names_as_list)
+            self.concatinate(dest_dataframe.get_dataframe())
+            return dest_dataframe.get_dataframe()
+        elif scaler_type == 'standard':
+            self.__vectorizer = StandardScaler()
+            dest_columns = self.get_columns(columns_names_as_list)
+            dest_dataframe = DataFrame(self.__vectorizer.fit_transform(X=dest_columns), 
+                                       line_index=self.get_index(),
+                                       columns_names_as_list=columns_names_as_list, 
+                                       file_type='matrix')
+            self.drop_columns(columns_names_as_list)
+            self.concatinate(dest_dataframe.get_dataframe())
+            return dest_dataframe.get_dataframe()
+        elif scaler_type == 'adjusted_log':
+            def log_function(o, min_column):
+                return np.log(1 + o - min_column)
+            for name in columns_names_as_list:
+                min_column = self.get_column(name).min()
+                self.transform_column(name, name, log_function, min_column)
+            return self.get_columns(columns_names_as_list)
+                        
+    def scale_dataframe(self, scaler_type='min_max', in_place=True):
+        """A method  to standardize the independent features present in the dataframe in a fixed range.
+
+        Args:
+            column_name ([type]): 
+            scaler_type (str, optional): ['min_max', 'standard', 'adjusted_log']. Defaults to 'min_max'.
+            in_place (bool, optional): if False the modification do not  affects the dataframe. Defaults to True.
+        """
+        if scaler_type == 'min_max':
+            self.__vectorizer = MinMaxScaler() 
+            self.set_column(self.__vectorizer.fit_transform(X=self.get_dataframe()))
+            return self.get_dataframe()
+        elif scaler_type == 'standard':
+            self.__vectorizer = StandardScaler() 
+            self.set_column(self.__vectorizer.fit_transform(X=self.get_dataframe()))
+            return self.get_dataframe()
+        elif scaler_type == 'adjusted_log':
+            def log_function(o, min_column):
+                return np.log(1 + o - min_column)
+            for name in self.get_columns_names():
+                min_column = self.get_column(name).min()
+                self.transform_column(name, name, log_function, min_column)
+            return self.get_dataframe()
         
     def load_dataset(self, dataset='iris'):
         """
