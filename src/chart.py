@@ -2,14 +2,15 @@ import seaborn as sns
 from matplotlib import pyplot as plt
 import plotly.graph_objects as go
 import plotly.express as px
-from dataframe import DataFrame
 import matplotlib.ticker as plticker
 import numpy as np
 import pandas as pd
 
+
+
 class Chart:
-    chart_type_list = ['line', 'bar', 'box', 'swarm', 'strip_swarm', 'count', 'reg', 'dist', 'point', 'pair',
-                  'correlation_map', 'scatter', 'heat_map']
+    chart_type_list = ['line', 'bar', 'box', 'swarm', 'strip_swarm', 'count', 'scatter', 'dist', 'point', 'pair',
+                  'correlation_map', 'reg', 'heat_map']
 
     def __init__(self, dataframe=None, column4x=None, chart_type='pair', group_by=None, columns_names_list=None, plotly=False):
         self.dataframe = dataframe
@@ -21,10 +22,10 @@ class Chart:
         self.group_by = group_by
         self.columns_names_list = columns_names_list
         self.plotly = plotly
-        #sns.set_theme(style="darkgrid")
-        self.fig, self.ax = plt.subplots(figsize = (18,6))
+        sns.set_theme(color_codes=True)
+        
 
-    def add_data_to_show(self, data_column=None, column4hover=None, column4size=None):
+    def add_data_to_show(self, data_column=None, column4hover=None, column4size=None, y_column=None, color=None):
         print(self.chart_type)
         if self.plotly == True:
             if self.chart_type == self.chart_type_list[0]:
@@ -60,6 +61,7 @@ class Chart:
             elif self.chart_type == self.chart_type_list[11]:
                 self.fig = px.scatter(self.dataframe, x=self.column4x, y=data_column, color=self.group_by, size=column4size, hover_name=column4hover)
         else:
+            #sns.set_style("whitegrid")
             if self.chart_type == self.chart_type_list[0]:
                 self.ax = sns.lineplot(data=self.dataframe, x=self.column4x, y=data_column, markers=True, hue=self.group_by)
             elif self.chart_type == self.chart_type_list[1]:
@@ -84,6 +86,9 @@ class Chart:
                 self.ax = sns.pairplot(self.dataframe, hue=self.group_by, vars=self.columns_names_list)
             elif self.chart_type == self.chart_type_list[10]:
                 self.ax = sns.clustermap(self.dataframe.corr(), annot=True, center=0.0)
+            elif self.chart_type == self.chart_type_list[11]:
+                self.ax = sns.jointplot(x=data_column, y=y_column, data=self.dataframe, kind="reg", color=color)
+                #self.ax = sns.scatterplot(data=self.dataframe, x=data_column, y=y_column)
             elif self.chart_type == self.chart_type_list[12]:
                 # Compute the correlation matrix
                 corr = self.dataframe.corr()
@@ -94,6 +99,7 @@ class Chart:
                 # Draw the heatmap with the mask and correct aspect ratio
                 self.ax = sns.heatmap(corr, mask=mask, cmap=cmap, vmax=.3, center=0,
                             square=True, linewidths=.5, cbar_kws={"shrink": .5})
+            return self.ax
     
     def plot_on_map(self,
                     iso_locations_column=None,
@@ -149,11 +155,11 @@ class Chart:
                interval=None,
                x_rotation_angle=90,
                y_rotation_angle=0,
-               titile_font_size=50,
-               x_label_font_size=15,
-               y_label_font_size=15,
-               x_font_size=13,
-               y_font_size=13,
+               titile_font_size=29,
+               x_label_font_size=13,
+               y_label_font_size=13,
+               x_font_size=11,
+               y_font_size=11,
                ):
         if self.plotly:
             self.fig.update_layout(
@@ -176,6 +182,9 @@ class Chart:
                 loc = plticker.MultipleLocator(base=interval) # this locator puts ticks at regular intervals
                 self.ax.xaxis.set_major_locator(loc)
 
-    def save(self, chart_path="output.png", transparent=True):
-        print(self.chart_type)
-        self.fig.savefig(chart_path, transparent=transparent, bbox_inches = 'tight')
+
+    def save(self, chart_path="output.png", transparent=False):
+        if self.plotly is True:
+            self.fig.savefig(chart_path, transparent=transparent, bbox_inches = 'tight', dpi=600)
+        else:
+            self.ax.savefig(chart_path, transparent=transparent, bbox_inches = 'tight', dpi=600)

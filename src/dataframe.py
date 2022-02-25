@@ -1,12 +1,13 @@
 from datetime import timedelta
 from math import ceil
 import pandas as pd
+from pyparsing import col
 import scipy.sparse
 from sklearn.decomposition import PCA
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
-from sklearn.preprocessing import StandardScaler
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sqlalchemy import column
 from lib import *
 from vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS
@@ -15,6 +16,8 @@ from sklearn.preprocessing import minmax_scale
 from sklearn.compose import ColumnTransformer
 from keras.preprocessing.sequence import TimeseriesGenerator as SG
 from sklearn.datasets import load_iris, load_boston
+from collections import Counter
+from chart import Chart
 
 
 class DataFrame:
@@ -24,22 +27,39 @@ class DataFrame:
     __generator = None
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 file_type='csv', line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
+                 data_type='csv', line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
         if data_link is not None:
-            if file_type == 'csv':
+            if data_type == 'csv':
                 self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, low_memory=False, error_bad_lines=False, skip_blank_lines=False)
-            elif file_type == 'json':
+            elif data_type == 'json':
                 self.__dataframe = pd.read_json(data_link, encoding='utf-8')
-            elif file_type == 'xls':
+            elif data_type == 'xls':
                 self.__dataframe = pd.read_excel(data_link, sheet_name=sheet_name)
-            elif file_type == 'dict':
+            elif data_type == 'pkl':
+                self.__dataframe = pd.read_pickle(data_link)
+            elif data_type == 'dict':
                 self.__dataframe = pd.DataFrame.from_dict(data_link)
-            elif file_type == 'matrix':
+            elif data_type == 'matrix':
                 index_name = [i for i in range(len(data_link))]
                 colums_name = [i for i in range(len(data_link[0]))]
                 self.__dataframe = pd.DataFrame(data=data_link, index=index_name, columns=colums_name)
+            elif data_type == 'list':
+                y = data_link
+                if (not isinstance(y, pd.core.series.Series or not isinstance(y, pd.core.frame.DataFrame))):
+                    y = np.array(y)
+                    y = np.reshape(y, (y.shape[0],))
+                    y = pd.Series(y)
+                self.__dataframe = pd.DataFrame()
+                if columns_names_as_list is not None:
+                    self.__dataframe[columns_names_as_list[0]] = y
+                else:
+                    self.__dataframe['0'] = y
+                    
+                
                 """data = array([['','Col1','Col2'],['Row1',1,2],['Row2',3,4]])
                 pd.DataFrame(data=data[1:,1:], index=data[1:,0], columns=data[0,1:]) """
+            elif data_type == 'df':
+                self.__dataframe = data_link
             types = {}
             if data_types_in_order is not None and columns_names_as_list is not None:
                 self.__dataframe.columns = columns_names_as_list
@@ -60,12 +80,14 @@ class DataFrame:
     def get_generator(self):
         return self.__generator
     
-    def get_index(self):
-        return self.__dataframe.index.to_list()
+    def get_index(self, as_list=True):
+        if as_list is True:
+            return self.__dataframe.index.to_list()
+        return self.__dataframe.index
     
     def add_time_serie_row(self, date_column, value_column, value, date_format='%Y'):
         last_date = self.get_index()[-1] + timedelta(days=1)
-        dataframe = DataFrame([{value_column: value, date_column: last_date}], file_type='dict')
+        dataframe = DataFrame([{value_column: value, date_column: last_date}], data_type='dict')
         dataframe.to_time_series(date_column, value_column, one_row=True, date_format=date_format)
         self.append_dataframe(dataframe.get_dataframe())
         
@@ -80,7 +102,7 @@ class DataFrame:
         elif data_type == 'df':
             self.__dataframe = data
 
-    def get_data_types(self, show=True):
+    def get_columns_types(self, show=True):
         types = self.get_dataframe().dtypes
         if show:
             print(types)
@@ -102,9 +124,12 @@ class DataFrame:
             print(description)
         return description
     
-    def reset_index(self):
-        self.set_dataframe(self.__dataframe.reset_index())
-
+    def reset_index(self, drop=True):
+        if drop is True:
+            self.set_dataframe(self.__dataframe.reset_index(drop=True))
+        else:
+            self.set_dataframe(self.__dataframe.reset_index())
+            
     def get_dataframe_as_sparse_matrix(self):
         return scipy.sparse.csr_matrix(self.__dataframe.to_numpy())
 
@@ -113,13 +138,17 @@ class DataFrame:
     
     def get_column_as_joined_text(self, column):
         return ' '.join(list(self.get_column(column)))
+    
+    def rename_index(self, new_name):
+        self.__dataframe.index.rename(new_name, inplace=True)
+        return self.get_dataframe()
 
-    def get_term_doc_matrix_as_df(self, vectorizer_type='count'):
-        corpus = list(self.get_column('comment'))
+    def get_term_doc_matrix_as_df(self, text_column_name, vectorizer_type='count'):
+        corpus = list(self.get_column(text_column_name))
         indice = ['doc' + str(i) for i in range(len(corpus))]
         v = Vectorizer(corpus, vectorizer_type=vectorizer_type)
         self.set_dataframe(DataFrame(v.get_sparse_matrix().toarray(), v.get_features_names(),
-                                      line_index=indice, file_type='ndarray').get_dataframe())
+                                      line_index=indice, data_type='matrix').get_dataframe())
 
     def get_dataframe_from_dic_list(self, dict_list):
         v = DictVectorizer()
@@ -131,6 +160,21 @@ class DataFrame:
         if all(self.get_column(column).apply(decision_func)):
             return True
         return False
+    
+    def show_word_occurrences_plot(self, column_name, most_common=50):
+        """Generating word occurrences plot from a column
+
+        Args:
+            column_name (_type_): column to be used
+            most_common (int, optional): number of most frequent term to use. Defaults to 50.
+        """
+        text = self.get_column_as_joined_text(column_name)
+        counter = Counter(text.split(' '))
+        data = DataFrame(counter.most_common(most_common), ['term', 'count'], data_type='dict', data_types_in_order=[str,int])
+        chart = Chart(data.get_dataframe(), column4x='term', chart_type='bar')
+        chart.add_data_to_show('count')
+        chart.config('Term occurrences bar chart', 'Terms', 'Occurrences', titile_font_size=30,)
+        chart.show()
 
     def set_dataframe_index(self, liste_indices):
         self.__dataframe.index = liste_indices
@@ -179,10 +223,28 @@ class DataFrame:
         if (not isinstance(column, pd.core.series.Series or not isinstance(column, pd.core.frame.DataFrame))):
             y = np.array(column)
             y = np.reshape(y, (y.shape[0],))
-            y = pd.Series(y)
-            print(y)
+            y = pd.Series(y, self.get_index())
         self.__dataframe[column_name] = y
-
+        
+    def add_transformed_columns(self, dest_column_name="new_column", transformation_rule="okk*2"):
+        columns_names = self.get_columns_names()
+        columns_dict = {}
+        for column_name in columns_names:
+            if column_name in transformation_rule:
+                columns_dict.update({column_name: self.get_column(column_name)})
+        y_transformed = eval(transformation_rule, columns_dict)
+        self.__dataframe[dest_column_name] = y_transformed
+        
+    def add_one_value_column(self, column_name, value, length=None):
+        if length is not None:
+            y = np.zeros(length)
+            y.fill(value)
+        else:
+            y = np.zeros((self.get_shape()[0]))
+            y.fill(value)
+        self.__dataframe[column_name] = y
+        return self.get_dataframe()
+        
     def get_dataframe(self):
         return self.__dataframe
 
@@ -203,11 +265,23 @@ class DataFrame:
     def sub(self, column, pattern, replacement):
         self.__dataframe = self.get_dataframe()[column].str.replace(pattern, replacement)
 
-    def drop_column(self, column):
-        self.__dataframe = self.__dataframe.drop(column, axis=1)
+    def drop_column(self, column_name):
+        """Drop a given column from the dataframe given its name
+
+        Args:
+            column (str): name of the column to drop
+
+        Returns:
+            [dataframe]: the dataframe with the column dropped
+        """
+        self.__dataframe = self.__dataframe.drop(column_name, axis=1)
+        return self.__dataframe
         
-    def drop_index(self):
-        self.__dataframe.reset_index(drop=True, inplace=True) 
+    def drop_index(self, drop=False):
+        if drop is True:
+            self.__dataframe.reset_index(drop=True, inplace=True) 
+        else:
+            self.__dataframe.reset_index(drop=False, inplace=True) 
         
     def drop_columns(self, columns_names_as_list):
         for p in columns_names_as_list:
@@ -217,6 +291,7 @@ class DataFrame:
         for p in self.get_columns_names():
             if p not in columns_names_as_list:
                 self.__dataframe = self.__dataframe.drop(p, axis=1)
+        return self.__dataframe
 
     def add_row(self, row_as_dict):
         self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
@@ -234,7 +309,6 @@ class DataFrame:
             else:
                 print("No missed data in column " + column)
         else:
-            print(self.get_dataframe().isna().any())
             for c in self.__dataframe.columns:
                 miss = self.__dataframe[c].isnull().sum()
                 if miss>0:
@@ -252,8 +326,10 @@ class DataFrame:
             self.get_dataframe().fillna(filling_dict_colmn_val, inplace=True)
         
     def get_row(self, row_index):
-        return self.get_dataframe().iloc[row_index]
-
+        if isinstance(row_index, int):
+            return self.get_dataframe().iloc[row_index]
+        return self.get_dataframe().loc[row_index]
+    
     def replace_column(self, column, pattern, replacement, regex=False, number_of_time=-1, case_sensetivity=False):
         self.set_column(column, self.get_column(column).str.replace(pattern, replacement, regex=regex, n=number_of_time,
                                                                     case=case_sensetivity))
@@ -270,18 +346,30 @@ class DataFrame:
         else:
             return self.get_column(column).apply(func)
         
-    def convert_column_type(self, column, new_type):
-        self.set_column(column, self.get_column(column).astype(new_type))
+    def convert_column_type(self, column_name, new_type='float64'):
+        """Convert the type of the column
 
-    def concatinate(self, dataframe, ignore_index=False):
+        Args:
+            column_name (str): Name of the column to convert
+            Retruns (dataframe): New dataframe after conversion
+        """
+        self.set_column(column_name, self.get_column(column_name).astype(new_type))
+        return self.get_columns_types()
+    
+    def convert_dataframe_type(self, new_type='float64'):
+        for p in self.get_columns_names():
+            self.convert_column_type(p, new_type)
+        return self.get_columns_types()
+
+    def concatinate(self, dataframe, ignore_index=False, join='outer'):
         """conacatenate horizontally two dataframe
 
         Args:
             dataframe (dataframe): the destination dataframe 
-            ignore_index (bool, optional): If True, do not use the index values along the concatenation axis. Defaults to True.
+            ignore_index (bool, optional): If True, do not use the index values along the concatenation axis. Defaults to False.
         """
         # 
-        self.__dataframe = pd.concat([self.get_dataframe(), dataframe], axis=1, ignore_index=ignore_index)
+        self.__dataframe = pd.concat([self.get_dataframe(), dataframe], axis=1, ignore_index=ignore_index, join=join)
     
     def append_dataframe(self, dataframe):
         # append dataset contents data_sets must have the same columns names
@@ -315,7 +403,7 @@ class DataFrame:
         sc = StandardScaler()
         columns_names = self.get_columns_names()
         dataframe_copy = self
-        dataframe = DataFrame(sc.fit_transform(X=self.get_dataframe()), columns_names_as_list=columns_names, file_type='matrix')
+        dataframe = DataFrame(sc.fit_transform(X=self.get_dataframe()), columns_names_as_list=columns_names, data_type='matrix')
         self.reindex_dataframe()
         dataframe_copy.set_column(column, dataframe.get_column(column))
         self.set_dataframe(dataframe_copy.get_dataframe())
@@ -346,7 +434,7 @@ class DataFrame:
         self.__vectorizer = MinMaxScaler()
         self.__vectorizer.fit(self.get_dataframe())
         scaled_dataframe = DataFrame(self.__vectorizer.transform(self.get_dataframe()), 
-                                     file_type='matrix',
+                                     data_type='matrix',
                                      columns_names_as_list=self.get_columns_names())
         return scaled_dataframe.get_dataframe()
     
@@ -431,7 +519,6 @@ class DataFrame:
 
     def count_occurence_of_row_as_count_column(self, column):
         column_name = 'count'
-        print(self.get_column(column).value_counts())
         self.set_column(column_name, self.get_column(column).value_counts())
         self.trasform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
     
@@ -450,7 +537,6 @@ class DataFrame:
 
     def count_true_decision_function_rows(self, column, decision_function):
         self.filter_dataframe(column, decision_function)
-        print(self.get_shape()[0])
         
     def show_wordcloud(self, column):
         wordcloud = WordCloud(
@@ -466,7 +552,7 @@ class DataFrame:
         plt.imshow(wordcloud)
         plt.show()
 
-    def reindex_dataframe(self, index_as_liste=None, index_as_column_name=None):
+    def reindex_dataframe(self, index_as_column_name=None, index_as_liste=None):
         if index_as_liste is not None:
             new_index = new_index = index_as_liste
             self.get_dataframe().index = new_index
@@ -547,9 +633,11 @@ class DataFrame:
         
     def plot_column(self, column):
         self.get_column(column).plot()
+        plt.show()
         
     def plot_dataframe(self):
         self.get_dataframe().plot()
+        plt.show()
         
     def to_numpy(self):
         return self.get_dataframe().values
@@ -557,6 +645,20 @@ class DataFrame:
     def info(self):
         return self.get_dataframe().info()
     
+    def drop_rows_by_year(self, year=2020, in_place=True):
+        year = int(year)
+        if in_place is True:
+            self.set_dataframe(self.get_dataframe()[self.get_index(as_list=False).year != year]) 
+        else:
+            return self.get_dataframe()[self.get_index(as_list=False).year != year]
+            
+    def keep_rows_by_year(self, year=2020, in_place=True):
+        year = int(year)
+        if in_place is True:
+            self.set_dataframe(self.get_dataframe()[self.get_index(as_list=False).year == year]) 
+        else:
+            return self.get_dataframe()[self.get_index(as_list=False).year == year]
+        
     def train_test_split(self, train_percent=0.8):
         seuil = ceil(self.get_shape()[0]*train_percent)
         train = self.get_dataframe().iloc[:seuil]
@@ -579,7 +681,7 @@ class DataFrame:
             self.set_dataframe(self.__dataframe.resample(frequency).sum())
         if agg == 'mean':
             self.set_dataframe(self.__dataframe.resample(frequency).mean())
-        return 0
+        return self.get_dataframe()
         
     def to_time_series(self, date_column, value_column, date_format='%Y-%m-%d', window_size=2, one_row=False):
         # when working with train test generators
@@ -632,7 +734,7 @@ class DataFrame:
         """
         
         if nbr_rows < 0:
-            self.set_dataframe(self.get_dataframe().iloc[:self.get_shape()[0]-nbr_rows])
+            self.set_dataframe(self.get_dataframe().iloc[:self.get_shape()[0]+nbr_rows])
         else:
             self.set_dataframe(self.get_dataframe().iloc[nbr_rows:])
             
@@ -643,6 +745,18 @@ class DataFrame:
             indexes_as_list (list, optional): [description]. Defaults to [0].
         """
         self.set_dataframe(self.get_dataframe().drop(indexes_as_list))
+        
+    def save(self, path=None):
+        """Save a dataframe in pkl format for future use
+
+        Args:
+            path ([type], optional): link and name of storage file. If set to None, it will be dataframe.pkl.
+        """
+        if path is None:
+            self.get_dataframe().to_pickle("dataframe.pkl")
+        else:
+            self.get_dataframe().to_pickle(path)
+            
         
     def dataframe_skip_columns(self, intitial_index, final_index, step=2):
         self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:step])
@@ -664,7 +778,7 @@ class DataFrame:
             dest_dataframe = DataFrame(self.__vectorizer.fit_transform(X=dest_columns), 
                                        line_index=self.get_index(),
                                        columns_names_as_list=columns_names_as_list, 
-                                       file_type='matrix')
+                                       data_type='matrix')
             self.drop_columns(columns_names_as_list)
             self.concatinate(dest_dataframe.get_dataframe())
             return dest_dataframe.get_dataframe()
@@ -674,7 +788,7 @@ class DataFrame:
             dest_dataframe = DataFrame(self.__vectorizer.fit_transform(X=dest_columns), 
                                        line_index=self.get_index(),
                                        columns_names_as_list=columns_names_as_list, 
-                                       file_type='matrix')
+                                       data_type='matrix')
             self.drop_columns(columns_names_as_list)
             self.concatinate(dest_dataframe.get_dataframe())
             return dest_dataframe.get_dataframe()
@@ -696,11 +810,15 @@ class DataFrame:
         """
         if scaler_type == 'min_max':
             self.__vectorizer = MinMaxScaler() 
-            self.set_column(self.__vectorizer.fit_transform(X=self.get_dataframe()))
+            column_names = self.get_columns_names()
+            self.set_dataframe(DataFrame(self.__vectorizer.fit_transform(X=self.get_dataframe()), 
+                                       line_index=self.get_index(),
+                                       columns_names_as_list=column_names, 
+                                       data_type='matrix').get_dataframe())
             return self.get_dataframe()
         elif scaler_type == 'standard':
             self.__vectorizer = StandardScaler() 
-            self.set_column(self.__vectorizer.fit_transform(X=self.get_dataframe()))
+            self.set_dataframe(self.__vectorizer.fit_transform(X=self.get_dataframe()))
             return self.get_dataframe()
         elif scaler_type == 'adjusted_log':
             def log_function(o, min_column):
