@@ -8,8 +8,8 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sqlalchemy import column
-from lib import *
-from vectorizer import Vectorizer
+from .lib import *
+from .vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import minmax_scale
@@ -17,7 +17,7 @@ from sklearn.compose import ColumnTransformer
 from keras.preprocessing.sequence import TimeseriesGenerator as SG
 from sklearn.datasets import load_iris, load_boston
 from collections import Counter
-from chart import Chart
+from .chart import Chart
 
 
 class DataFrame:
