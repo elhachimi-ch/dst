@@ -7,7 +7,6 @@ from sklearn.decomposition import PCA
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sqlalchemy import column
 from .lib import *
 from .vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS

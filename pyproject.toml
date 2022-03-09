@@ -2,5 +2,17 @@
 requires = [
     "setuptools>=42",
     "wheel",
+    "pandas",
+    "numpy",
+    "tensorflow",
+    "scikit-learn",
+    "seaborn",
+    "matplotlib",
+    "wordcloud",
+    "keras",
+    "plotly",
+    "xgboost",
+    "opencv-python",
+    "scikit-image",
 ]
 build-backend = "setuptools.build_meta"
