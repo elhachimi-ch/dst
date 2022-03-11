@@ -14,5 +14,9 @@ requires = [
     "xgboost",
     "opencv-python",
     "scikit-image",
+    "unidecode",
+    "emoji",
+    "textblob",
+    "contextily",
 ]
 build-backend = "setuptools.build_meta"
