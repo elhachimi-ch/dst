@@ -3,7 +3,7 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 import joblib
 from tensorflow.keras.utils import to_categorical
-from .lib import *
+from .lib import Lib
 from sklearn.preprocessing import MinMaxScaler
 import nltk
 
@@ -19,7 +19,7 @@ class Vectorizer:
                 self.__vectorizer = cv
                 self.__matrice = matrice
             elif vectorizer_type == 'tfidf':
-                tfidfv = TfidfVectorizer(max_features=space_dimension, stop_words=Lib.load_stop_words('english'), preprocessor=self.preprocessor)
+                tfidfv = TfidfVectorizer(max_features=space_dimension, preprocessor=self.preprocessor)
                 matrice = tfidfv.fit_transform(docs_list)
                 self.__vectorizer = tfidfv
                 self.__matrice = matrice

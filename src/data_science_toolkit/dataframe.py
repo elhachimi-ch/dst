@@ -17,6 +17,7 @@ from keras.preprocessing.sequence import TimeseriesGenerator as SG
 from sklearn.datasets import load_iris, load_boston
 from collections import Counter
 from .chart import Chart
+import numpy as np
 
 
 class DataFrame:
