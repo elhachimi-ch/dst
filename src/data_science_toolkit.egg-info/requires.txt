@@ -16,3 +16,5 @@ unidecode
 emoji
 textblob
 contextily
+nltk
+wordcloud
