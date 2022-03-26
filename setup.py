@@ -43,5 +43,7 @@ setuptools.setup(
         "emoji",
         "textblob",
         "contextily",
+        "nltk",
+        "wordcloud",
     ],
 )
