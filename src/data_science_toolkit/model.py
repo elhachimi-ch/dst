@@ -2,13 +2,15 @@
 Under MIT License by EL HACHIMI CHOUAIB
 """
 import tensorflow.keras.losses
+import tensorflow.keras.optimizers
+from tensorflow.keras import backend as K
 import sklearn.tree as tree
 from tensorflow.keras.layers import Dense, Conv2D, Flatten, MaxPooling2D, Dropout, MaxPool1D, Conv1D, Reshape, LSTM
 from tensorflow.keras.models import Sequential
 from matplotlib import pyplot as plt
 from sklearn import svm
 from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error, mean_squared_log_error, mean_absolute_error, classification_report, precision_score, accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc
+from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error, mean_squared_log_error, mean_absolute_error, classification_report
 from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
@@ -20,8 +22,16 @@ from joblib import dump, load
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import ExtraTreesRegressor, ExtraTreesClassifier
 import pandas as pd
-from xgboost import XGBClassifier, XGBRegressor
+from xgboost import XGBClassifier, XGBRegressor, plot_importance
 from sklearn.naive_bayes import GaussianNB
+import graphviz
+import tensorflow as tf
+import numpy as np
+from chart import Chart
+from dataframe import DataFrame
+import seaborn as sns
+from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+
 
 
 class Model:
@@ -30,26 +40,13 @@ class Model:
         data_x=None, 
         data_y=None, 
         model_type='knn', 
-        c_or_r_or_ts='c',
+        task='c',
         training_percent=1, 
         epochs=50, 
         batch_size=32, 
         generator=None,
         validation_percentage=0.2
         ):
-        """[summary]
-
-        Args:
-            data_x ([type], optional): dataframe of estimators features. Defaults to None.
-            data_y ([type], optional): dataframe of target features to be estimated. Defaults to None.
-            model_type (str, optional): machine learning model to use (knn, dt -> decision tree, rf -> random forest, etc). Defaults to 'knn'.
-            c_or_r_or_ts (str, optional): task type (classification, reression or time series forecasting). Defaults to 'c'.
-            training_percent (int, optional): percent to be used in data spliting for training part. Defaults to 1.
-            epochs (int, optional): number of epochs. Defaults to 50.
-            batch_size (int, optional): Defaults to 32.
-            generator (data generator, optional): provide the data as a generator function. Defaults to None.
-            validation_percentage (float, optional): percent to be used in data spliting for validation part. Defaults to 0.2.
-        """
         
         if training_percent != 1:
             self.__x_train, self.__x_test, self.__y_train, self.__y_test = train_test_split(data_x, 
@@ -69,41 +66,41 @@ class Model:
         self.__boosted_model = None
         self.__generator = generator
         self.history = 'None'
-        self.__c_or_r_ts = c_or_r_or_ts
+        self.__c_or_r_ts = task
         self.__validation_percentage = validation_percentage
         
         if model_type == 'dt':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = tree.DecisionTreeClassifier()
             else:
                 self.__model = tree.DecisionTreeRegressor()
 
         elif model_type == 'svm':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = svm.SVC()
             else:
                 self.__model = svm.SVR()
                 
         elif model_type == 'lr':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = LogisticRegression(random_state=2)
             else:
                 self.__model = LinearRegression()
 
         elif model_type == 'nb':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = MultinomialNB()
             else:
                 self.__model = GaussianNB()
         
         elif model_type == 'rf':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = RandomForestClassifier()
             else:
                 self.__model = RandomForestRegressor()
                 
         elif model_type == 'xb':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = XGBClassifier()
             else:
                 self.__model = XGBRegressor()
@@ -112,10 +109,16 @@ class Model:
             self.__model = Sequential()
 
         elif model_type == 'knn':
-            if c_or_r_or_ts == 'c':
+            if task == 'c':
                 self.__model = KNeighborsClassifier(n_neighbors=5)
             else:
                 self.__model = KNeighborsRegressor(n_neighbors=5)
+                
+        elif model_type == 'gb':
+            if task == 'c':
+                self.__model = GradientBoostingClassifier()
+            else:
+                self.__model = GradientBoostingRegressor() 
             
         else:
             self.__model = None
@@ -133,16 +136,30 @@ class Model:
         self.__model = model
     
     def add_layer(self, connections_number=2, activation_function='relu', input_dim=None):
+        """Add a dense layer to the model architecture
+
+        Args:
+            connections_number (int, optional): number of neurons to add. Defaults to 2.
+            activation_function (str, optional): function to apply on sum of wi.xi. examples: ['linear', 'relu', 'softmax']. Defaults to 'relu'.
+            input_dim (int, optional): number of features in X matrix. Defaults to None.
+        """
         if input_dim:
             self.__model.add(Dense(connections_number, activation=activation_function, input_dim=input_dim))
         else:
             self.__model.add(Dense(connections_number, activation=activation_function))
             
-    def add_lstm_layer(self, connections_number=2, activation_function='relu', input_shape=None):
+    def add_lstm_layer(self, connections_number=2, activation_function='relu', input_shape=None, return_sequences=True):
+        """Add a lstm layer
+
+        Args:
+            connections_number (int, optional): [description]. Defaults to 2.
+            activation_function (str, optional): [description]. Defaults to 'relu'.
+            input_shape ([type], optional): example: (weather_window,1). Defaults to None.
+        """
         if input_shape is not None:
-            self.__model.add(LSTM(units=connections_number, activation=activation_function, input_shape=input_shape, return_sequences=True))
+            self.__model.add(LSTM(units=connections_number, activation=activation_function, input_shape=input_shape, return_sequences=return_sequences))
         else:
-            self.__model.add(LSTM(units=connections_number, activation=activation_function, return_sequences=True))
+            self.__model.add(LSTM(units=connections_number, activation=activation_function, return_sequences=return_sequences))
 
     def add_conv_2d_layer(self, filter_nbr=1, filter_shape_tuple=(3,3), input_shape=None, activation_function='relu'):
         if input_shape:
@@ -183,8 +200,23 @@ class Model:
         """ dropout default initial value """
         self.__model.add(Dropout(rate_to_keep_output_value))
 
-    def train(self, loss=tensorflow.keras.losses.categorical_crossentropy, optimizer=tensorflow.keras.optimizers.SGD(lr=0.001), metrics_as_list=['accuracy']):
+    def train(self, loss=tensorflow.keras.losses.mse, optimizer=tensorflow.keras.optimizers.Adam(learning_rate=0.001), 
+              metrics_as_list_of_functions_or_str=['accuracy']):
+        
         """
+        losses and metrics for regresion:
+        tensorflow.keras.losses.mse
+        r2_keras
+        
+        losses and metrics for classification:
+        multi classes: tensorflow.keras.losses.categorical_crossentropy
+        two classes: tensorflow.keras.losses.binary_crossentropy
+                
+        Optimizers:
+        tensorflow.keras.optimizers.SGD(learning_rate=0.01)
+        tensorflow.keras.optimizers.Adam(learning_rate=0.01)
+        ...
+        
         if you pass y as integers use loss='sparse_categorical_crossentropy'
         class Adadelta: Optimizer that implements the Adadelta algorithm.
         class Adagrad: Optimizer that implements the Adagrad algorithm.
@@ -197,7 +229,10 @@ class Model:
         class SGD: Gradient descent (with momentum) optimizer.
         """
         if self.__model_type == 'dl':
-            self.__model.compile(loss=loss, optimizer=optimizer, metrics=[tensorflow.keras.metrics.RootMeanSquaredError()])
+            if 'r2_keras' in metrics_as_list_of_functions_or_str:
+                metrics_as_list_of_functions_or_str.remove('r2_keras')
+                metrics_as_list_of_functions_or_str.append(self.r2_keras)
+            self.__model.compile(loss=loss, optimizer=optimizer, metrics=metrics_as_list_of_functions_or_str)
             if self.__generator is not None:
                 self.history = self.__model.fit(self.get_generator(), epochs=self.__epochs, batch_size=self.__batch_size)
                 print(self.history.history)
@@ -205,47 +240,29 @@ class Model:
                 self.history = self.__model.fit(self.x, self.y, epochs=self.__epochs,
                                         batch_size=self.__batch_size, validation_split=self.__validation_percentage)
                 print(self.history.history)
+                self.__y_pred = self.__model.predict(self.__x_test)
         else:
             self.__model.fit(self.__x_train, self.__y_train)
             self.__y_pred = self.__model.predict(self.__x_test)
+        """history_dict = history.history
+        loss_values = history_dict['loss']
+        val_loss_values = history_dict['val_loss']
+        acc_values = history_dict['acc']
+        val_acc_values = history_dict['val_acc']"""
 
     def summary(self):
         print(self.__model.summary())
         
     # banary classification
     def predict(self, x_to_pred):
-        """Make a new prediction using the trained model
-
-        Args:
-            x_to_pred (matrix): list of rows or instances to predict
-
-        Returns:
-            reel: predicted value
-        """
         return self.__model.predict(x_to_pred)
     
     def forcast_next_step(self, window):
-        """Forecasting of one step in a time series using the trained model
-
-        Args:
-            window ([type]): [description]
-
-        Returns:
-            reel: forecasted value
-        """
         current_batch = window.reshape((1, window.shape[0], 1))
         # One timestep ahead of historical 12 points
         return self.predict(current_batch)[0]
 
     def predict_proba(self, x_to_pred):
-        """Predict a probability distribution
-
-        Args:
-            x_to_pred (matrix): list of rows or instances to predict
-
-        Returns:
-            list: an array of probability distributions
-        """
         return self.__model.predict_proba(x_to_pred)
 
     def accuracy(self):
@@ -262,37 +279,52 @@ class Model:
     def f1_score(self):
         return f1_score(self.__y_test, self.__y_pred)
 
-    def regression_report(self, y_test=None, y_predicted=None): 
-        """Calculate regression metrics by passing y_test and y_predicted
-        
-        Args:
-            y_test ([type], optional): column of reel values. Defaults to None.
-            y_predicted ([type], optional): column of predicted values. Defaults to None.
-
-        Returns:
-            (dict): a dictionary of regression metrics
+    def regression_report(self, y_test=None, y_predicted=None, savefig=False): 
         """
+        pass y_test and y_predected as pandas serie is get_column
+        """
+        
         if y_test is not None and y_predicted is not None:
             self.__y_test = y_test
             self.__y_pred = y_predicted
+        
+        data = DataFrame(self.__y_test, data_type='list', columns_names_as_list=['y_test'], data_types_in_order=[float])
+        data.add_column(self.__y_pred, 'y_predicted')
+        data.reset_index(drop=True)
+        sns.set_theme(color_codes=True)
+        x_plot = np.linspace(0, int(max(self.__y_test)))
+
+        g = sns.FacetGrid(data.get_dataframe(), size = 7)
+        g = g.map(plt.scatter, "y_test", "y_predicted", edgecolor='w')
+        plt.plot(x_plot, x_plot, color='red', label='Identity line')
+        g.set_xlabels('Real values')
+        g.set_ylabels('Estimated values')
+        plt.legend()
+        plt.show()
+        
+        if savefig is True:
+            g.savefig('regression_scatter.png', dpi=600)
+        
+        if not np.any(self.__y_test<=0) or not np.any(self.__y_pred<=0):
+            return {
+                'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
+                'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
+                'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
+                'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
+                'MEDAE': median_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
+            }
         return {
-            'R2': r2_score(self.__y_test, self.__y_pred),
-            'MSE': mean_squared_error(self.__y_test, self.__y_pred),
-            'RMSE':sqrt(mean_squared_error(self.__y_test, self.__y_pred)),
-            'MAE': mean_absolute_error(self.__y_test, self.__y_pred),
-            'MEDAE': median_absolute_error(self.__y_test, self.__y_pred),
-            'MSLE': mean_squared_log_error(self.__y_test, self.__y_pred)
-        }
+                'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
+                'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
+                'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
+                'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
+                'MEDAE': median_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
+                'MSLE': mean_squared_log_error(self.__y_test, np.squeeze(self.__y_pred))
+            }
         
     def classification_report(self, y_test=None, y_predicted=None): 
-        """Calculate classification metrics by passing y_test and y_predicted
-        
-        Args:
-            y_test ([type], optional): column of reel values. Defaults to None.
-            y_predicted ([type], optional): column of predicted values. Defaults to None.
-
-        Returns:
-            (dict): a dictionary of classification metrics
+        """
+        pass y_test and y_predected as pandas serie is get_column
         """
         if y_test is not None and y_predicted is not None:
             self.__y_test = y_test
@@ -301,7 +333,7 @@ class Model:
     def roc_curve(self):
         fpr, tpr, thresholds = roc_curve(self.__y_test, self.__y_pred)
         roc_auc = auc(fpr, tpr)
-        print("Air sous la courbe" + str(roc_auc))
+        print("Air sous la courbe" + str(roc_auc)) 
         plt.figure()
         plt.plot(fpr, tpr, color='orange', lw=2, label='ROC curve(area under curve = % 0.2f)' % roc_auc)
         plt.plot([0, 1], [0, 1], color='darkgrey', lw=2, linestyle='--')
@@ -328,8 +360,6 @@ class Model:
         self.__model = load(model_path)
 
     def report(self):
-        """Ploting the chart of accuracy and loss over epochs
-        """
         if self.__model_type == 'dl':
             if self.__c_or_r_ts == 'ts' or self.__c_or_r_ts == 'r':
                 if self.__validation_percentage == 0:
@@ -344,12 +374,23 @@ class Model:
                 else:
                     loss = self.history.history['loss']
                     val_loss = self.history.history['val_loss']
+                    r2 = self.history.history['r2_keras']
+                    val_r2 = self.history.history['val_r2_keras']
                     x = range(1, len(loss) + 1)
-                    plt.subplot(1, 2, 2)
-                    plt.plot(x, loss, 'b', label='Training loss')
-                    plt.plot(x, val_loss, 'r', label='Validation loss')
-                    plt.title('Training and validation loss')
-                    plt.legend()
+                    # (1,2) one row and 2 columns
+                    fig, (ax1, ax2) = plt.subplots(1, 2)
+                    fig.suptitle('Training and validation monitoring of loss and R2')
+                    ax1.plot(x, loss, 'b', label='Training loss')
+                    ax1.plot(x, val_loss, 'r', label='Validation loss')
+                    ax1.set_title('Loss monitoring')
+                    ax1.legend()
+                    ax2.plot(x, r2, 'b', label='Training R2')
+                    ax2.plot(x, val_r2, 'r', label='Validation R2')
+                    ax2.set_title('R2 monitoring')
+                    ax2.legend()
+                print(self.regression_report()) 
+                plt.show()
+                
             elif self.__c_or_r_ts == 'c':
                 if self.__validation_percentage == 0:
                     acc = self.history.history['accuracy']
@@ -371,12 +412,12 @@ class Model:
                     val_loss = self.history.history['val_loss']
                     x = range(1, len(acc) + 1)
                     plt.figure(figsize=(12, 5))
-                    plt.subplot(1, 2, 1)
+                    plt.subplot(2, 2, 1)
                     plt.plot(x, acc, 'b', label='Training accuracy')
                     plt.plot(x, val_acc, 'r', label='Validation accuracy')
                     plt.title('Training and validation accuracy')
                     plt.legend()
-                    plt.subplot(1, 2, 2)
+                    plt.subplot(2, 2, 2)
                     plt.plot(x, loss, 'b', label='Training loss')
                     plt.plot(x, val_loss, 'r', label='Validation loss')
                     plt.title('Training and validation loss')
@@ -387,25 +428,16 @@ class Model:
             else:
                 print(self.classification_report()) 
                 
-    def cross_validation(self, k=7):
-        """perform a cross validation for the trained model
-        for more metrics: https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter
-        Args:
-            k (in): number of folds
-        """
+    def cross_validation(self, k):
+        """https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter"""
         # scoring = "neg_mean_squared_error"
         if self.__c_or_r_ts == 'r':
-            scoring = "r2"
+            scoring = "r2" 
         elif self.__c_or_r_ts == 'c':
             scoring = "accuracy"
         print(cross_val_score(self.__model, self.x, self.y, cv=k, scoring=scoring))
         
     def get_features_importance(self):
-        """calculate the importance vector as a Feature selection task onn te data_x and show the result as bar chart
-
-        Returns:
-            ndarray: feature importance vector
-        """
         if self.__c_or_r_ts == 'r':
             etr_model = ExtraTreesRegressor()
             etr_model.fit(self.x,self.y)
@@ -415,7 +447,51 @@ class Model:
         else:
             etr_model = ExtraTreesClassifier()
             etr_model.fit(self.x,self.y)
-            feature_imp = pd.Series(etr_model.feature_importances_,index=self.x.columns)
+            feature_imp = pd.Series(etr_model.feature_importances_,index=[i for i in range(self.x.shape[1])])
             feature_imp.nlargest(10).plot(kind='barh')
             plt.show()
+            """model = self.__model # or XGBRegressor
+            plot_importance(model, importance_type = 'gain') # other options available
+            plt.show()
+            # if you need a dictionary 
+            model.get_booster().get_score(importance_type = 'gain')"""
         return etr_model.feature_importances_
+    
+    def dt_text_representation(self):
+        return tree.export_text(self.__model)
+    
+    def plot_dt_representation(self, viz_type='graph_viz'):
+        if viz_type == 'graph_viz':
+            
+            # DOT data
+            dot_data = tree.export_graphviz(self.__model, out_file=None, 
+                                            feature_names=self.x.columns.values,  
+                                            class_names=self.y.name,
+                                            filled=True)
+
+            # Draw graph
+            graph = graphviz.Source(dot_data, format="png") 
+            return graph
+            
+        elif viz_type == 'matplotlib':
+            fig = plt.figure(figsize=(25,20))
+            _ = tree.plot_tree(self.__model, 
+                            feature_names=self.x.columns.values,  
+                            class_names=self.y.name,
+                            filled=True)
+            fig.savefig("decistion_tree.png")
+            plt.show()
+            
+    def viz_reporter(self):
+        plt.figure(figsize=(10, 6))
+        plt.plot(self.__y_test, linewidth=3, label='ground truth')
+        plt.plot(self.__y_pred, linewidth=3, label='predicted')
+        plt.legend(loc='best')
+        plt.xlabel('X')
+        plt.ylabel('target value')
+        
+    @staticmethod
+    def r2_keras(y_true, y_pred):
+        SS_res =  K.sum(K.square( y_true-y_pred ))
+        SS_tot = K.sum(K.square( y_true - K.mean(y_true) ) )
+        return ( 1 - SS_res/(SS_tot + K.epsilon()) )

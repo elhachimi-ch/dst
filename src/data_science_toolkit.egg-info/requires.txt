@@ -15,6 +15,5 @@ scikit-image
 unidecode
 emoji
 textblob
-contextily
 nltk
 wordcloud
