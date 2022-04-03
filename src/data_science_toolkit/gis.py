@@ -5,13 +5,13 @@ import math
 from numpy.linalg import matrix_power
 import nltk
 import lib
-from dataframe import DataFrame
-from vectorizer import Vectorizer, stemming
-from model import Model
-from rl import *
-from chart import Chart
+from .dataframe import DataFrame
+from .vectorizer import Vectorizer, stemming
+from .model import Model
+from .rl import *
+from .chart import Chart
 import pandas as pd
-from lib import *
+from .lib import *
 import contextily as cx
 from matplotlib import pyplot as plt
 import geopandas as gpd
