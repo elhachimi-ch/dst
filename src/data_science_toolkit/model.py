@@ -27,8 +27,8 @@ from sklearn.naive_bayes import GaussianNB
 import graphviz
 import tensorflow as tf
 import numpy as np
-from chart import Chart
-from dataframe import DataFrame
+from .chart import Chart
+from .dataframe import DataFrame
 import seaborn as sns
 from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
 
