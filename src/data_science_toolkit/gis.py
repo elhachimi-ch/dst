@@ -3,7 +3,7 @@ from numpy.linalg import matrix_power
 from dataframe import DataFrame
 from rl import *
 import pandas as pd
-from lib import Lib
+from .lib import Lib
 import contextily as cx
 from matplotlib import pyplot as plt
 import geopandas as gpd
