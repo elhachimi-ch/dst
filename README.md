@@ -10,6 +10,9 @@ Data Science Toolkit (DST) is a Python library that helps implement data science
 ## Simple Demo
 
 ```python
+from data_science_toolkit.dataframe import DataFrame
+from data_science_toolkit.model import Model
+
 data = DataFrame()
 data.load_dataset('iris')
 y = data.get_column('target')

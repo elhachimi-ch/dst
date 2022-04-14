@@ -1,24 +1,14 @@
 import numpy as np
-import time
-import sys
-import math
 from numpy.linalg import matrix_power
-import nltk
-import lib
-from .dataframe import DataFrame
-from .vectorizer import Vectorizer, stemming
-from .model import Model
-from .rl import *
-from .chart import Chart
+from dataframe import DataFrame
+from rl import *
 import pandas as pd
-from .lib import *
+from lib import Lib
 import contextily as cx
 from matplotlib import pyplot as plt
 import geopandas as gpd
-import folium as fl
 from shapely.geometry import Point
 import xarray as xr
-import cfgrib
 
 class GIS:
     """
@@ -36,6 +26,20 @@ class GIS:
         
     def get_data_layer(self, layer_name):
         return self.data_layers.get(layer_name)
+    
+    def get_shape(self, layer_name):
+        return self.data_layers[layer_name].shape
+    
+    def add_random_series_column(self, layer_name, column_name='random',min=0, max=100, distrubution_type='random', mean=0, sd=1):
+        if distrubution_type == 'random':
+            series = pd.Series(np.random.randint(min, max, self.get_shape(layer_name)[0]))
+        elif distrubution_type == 'standard_normal':
+            series = pd.Series(np.random.standard_normal(self.get_shape(layer_name)[0]))
+        elif distrubution_type == 'normal':
+            series = pd.Series(np.random.normal(mean, sd, self.get_shape(layer_name)[0]))
+        else:
+            series = pd.Series(np.random.randn(self.get_shape(layer_name)[0]))
+        self.add_column(layer_name, series, column_name)
     
     def join_layer(self, layer_name, geo_datframe_to_join, on):
         self.data_layers[layer_name] = self.data_layers.get(layer_name).merge(geo_datframe_to_join, on=on)
@@ -71,6 +75,9 @@ class GIS:
         EPSG: european petroleum survey group
         """
         return self.get_data_layer(layer_name).crs
+    
+    def reorder_columns(self, layer_name, new_order_as_list):
+        self.data_layers[layer_name].reindex_axis(new_order_as_list, axis=1)
     
     def export(self, layer_name, file_name, file_format='geojson'):
         if file_format == 'geojson':
@@ -154,6 +161,9 @@ class GIS:
     def get_area_column(self, layer_name):
         return self.get_data_layer(layer_name).area
     
+    def get_perimeter_column(self, layer_name):
+        return self.get_data_layer(layer_name).length
+    
     def get_row_area(self, layer_name, row_index):
         return self.data_layers[layer_name].area.iloc[row_index]
     
@@ -176,11 +186,20 @@ class GIS:
             else:
                 return self.data_layers[layer_name].loc[self.get_column(column).apply(func_de_decision)]
 
-    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, *args):
-        if (len(args) != 0):
-            self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
+    def transform_column(self, layer_name, column_to_trsform, column_src, fun_de_trasformation, in_place= True,*args):
+        if in_place is True:
+            if (len(args) != 0):
+                self.set_column(layer_name, column_to_trsform, self.get_column(layer_name, column_src).apply(fun_de_trasformation, args=(args[0],)))
+            else:
+                self.set_column(layer_name, column_to_trsform, self.get_column(layer_name, column_src).apply(fun_de_trasformation)) 
         else:
-            self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
+            if (len(args) != 0):
+                return self.get_column(layer_name, column_src).apply(fun_de_trasformation, args=(args[0],))
+            else:
+                return self.get_column(layer_name, column_src).apply(fun_de_trasformation)
+            
+    def set_column(self, layer_name, column_name, new_column):
+        self.data_layers[layer_name][column_name] = new_column
     
     def get_column(self, layer_name, column):
         return self.data_layers[layer_name][column]
@@ -214,6 +233,21 @@ class GIS:
             
     def calculate_area_as_column(self, layer_name):
         self.add_column(layer_name, self.get_area_column(layer_name), 'area')
+        
+    def calculate_perimeter_as_column(self, layer_name):
+        self.add_column(layer_name, self.get_perimeter_column(layer_name), 'perimeter')
+        
+    def count_occurence_of_each_row(self, layer_name, column_name):
+        return self.data_layers[layer_name].pivot_table(index=[column_name], aggfunc='size')
+    
+    def add_transformed_columns(self, layer_name, dest_column_name="new_column", transformation_rule="okk*2"):
+        columns_names = self.get_columns_names(layer_name)
+        columns_dict = {}
+        for column_name in columns_names:
+            if column_name in transformation_rule:
+                columns_dict.update({column_name: self.get_column(layer_name, column_name)})
+        y_transformed = eval(transformation_rule, columns_dict)
+        self.data_layers[layer_name][dest_column_name] = y_transformed
          
     
     @staticmethod
@@ -230,7 +264,3 @@ class GIS:
             row_as_dict = {'id_pipeline': id_pipeline,
                         'geometry': vf}
             map.add_row('valves', row_as_dict)
-        
-    
-        
-    

@@ -3,7 +3,7 @@ from sklearn.feature_extraction import DictVectorizer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 import joblib
 from tensorflow.keras.utils import to_categorical
-from .lib import Lib
+from lib import Lib
 from sklearn.preprocessing import MinMaxScaler
 import nltk
 
@@ -11,21 +11,27 @@ class Vectorizer:
     __vectorizer = None
     __matrice = None
 
-    def __init__(self, docs_list=None, vectorizer_type='count', ngram_tuple=(1,1), space_dimension=None, dataframe=None):
-        if docs_list is not None:
+    def __init__(self, documents_as_list=None, vectorizer_type='count', ngram_tuple=(1,1), space_dimension=None, dataframe=None, preprocessing=None):
+        if documents_as_list is not None:
             if vectorizer_type == 'count':
                 cv = CountVectorizer(ngram_range=ngram_tuple)
-                matrice = cv.fit_transform(docs_list)
+                matrice = cv.fit_transform(documents_as_list)
                 self.__vectorizer = cv
                 self.__matrice = matrice
             elif vectorizer_type == 'tfidf':
-                tfidfv = TfidfVectorizer(max_features=space_dimension, preprocessor=self.preprocessor)
-                matrice = tfidfv.fit_transform(docs_list)
-                self.__vectorizer = tfidfv
-                self.__matrice = matrice
+                if preprocessing is None:
+                    tfidfv = TfidfVectorizer(max_features=space_dimension, preprocessor=self.preprocessor)
+                    matrice = tfidfv.fit_transform(documents_as_list)
+                    self.__vectorizer = tfidfv
+                    self.__matrice = matrice
+                else:
+                    tfidfv = TfidfVectorizer(max_features=space_dimension, preprocessor=preprocessing)
+                    matrice = tfidfv.fit_transform(documents_as_list)
+                    self.__vectorizer = tfidfv
+                    self.__matrice = matrice
             elif vectorizer_type == 'custom':
                 features = np.vectorize(Vectorizer.get_custom_features)
-                data = features(docs_list)
+                data = features(documents_as_list)
                 v = DictVectorizer()
                 matrice = v.fit_transform(data)
                 self.__vectorizer = v
@@ -63,7 +69,7 @@ class Vectorizer:
         result = []
         for p in tokens:
             result.append(nltk.stem.PorterStemmer().stem(p))
-        return ' '.join(result)
+        return ' '.join(result) 
 
     @staticmethod
     def get_custom_features(e):
@@ -77,10 +83,10 @@ class Vectorizer:
             'l3': e[-3:],
         }
 
-    def get_docs_projections_as_sparse(self, docs_liste, projection_type='normal'):
+    def get_docs_projections_as_sparse(self, documents_as_liste, projection_type='normal'):
         if projection_type != 'normal':
-            docs_liste = np.vectorize(Vectorizer.get_custom_features)(docs_liste)
-        return self.__vectorizer.transform(docs_liste)
+            documents_as_liste = np.vectorize(Vectorizer.get_custom_features)(documents_as_liste)
+        return self.__vectorizer.transform(documents_as_liste)
 
     def save_vectorizer(self, vectorizer_path='data/vectorizer.data'):
         out_vectorizer_file = open(vectorizer_path, 'wb')
@@ -110,7 +116,7 @@ class Vectorizer:
     def to_one_hot(vecteur_of_categories):
         """converti une colone avec des categorie mais numerique en forme One Hot Encoding exemple versicolor
         est de label 2 se transform en [0 0 1]"""
-        return to_categorical(vecteur_of_categories)
+        return Lib.to_categorical(vecteur_of_categories)
 
     @staticmethod
     def get_reshaped_matrix(matrix, new_shape_tuple):
@@ -124,14 +130,5 @@ class Vectorizer:
         images_as_liste.reshape(images_as_liste.shape[0], images_as_liste.shape[1], images_as_liste.shape[1], 1) \
             .astype('float32')
 
-from nltk.stem.isri import ISRIStemmer
 
-
-def stemming(string_in):
-    tokens = string_in.split()
-    new_tokens = []
-    stemmer = ArabicLightStemmer()
-    for p in tokens:
-        new_tokens.append(stemmer.light_stem(p))
-    return ''.join(new_tokens)
 

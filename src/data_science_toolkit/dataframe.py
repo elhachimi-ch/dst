@@ -7,8 +7,9 @@ from sklearn.decomposition import PCA
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from .lib import *
-from .vectorizer import Vectorizer
+from zmq import has
+from lib import Lib
+from vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS
 from matplotlib import pyplot as plt
 from sklearn.preprocessing import minmax_scale
@@ -16,8 +17,10 @@ from sklearn.compose import ColumnTransformer
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator as SG
 from sklearn.datasets import load_iris, load_boston
 from collections import Counter
-from .chart import Chart
+from chart import Chart
 import numpy as np
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
 
 
 class DataFrame:
@@ -27,10 +30,16 @@ class DataFrame:
     __generator = None
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 data_type='csv', line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
+                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
         if data_link is not None:
             if data_type == 'csv':
-                self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, low_memory=False, error_bad_lines=False, skip_blank_lines=False)
+                if has_header is True:
+                    self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
+                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False)
+                else:
+                    self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
+                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False,
+                                               header=None)
             elif data_type == 'json':
                 self.__dataframe = pd.read_json(data_link, encoding='utf-8')
             elif data_type == 'xls':
@@ -79,6 +88,52 @@ class DataFrame:
         
     def get_generator(self):
         return self.__generator
+    
+    def remove_stopwords(self, column, language_or_stopwords_list='english'):
+        if isinstance(language_or_stopwords_list, list) is True:
+            stopwords = language_or_stopwords_list
+        elif language_or_stopwords_list == 'arabic':
+            stopwords = Lib.read_text_file_as_list('data/arabic_stopwords.csv')
+        else:
+            nltk.download('stopwords')
+            stopwords = nltk.corpus.stopwords.words(language_or_stopwords_list)
+        self.transform_column(column, column, DataFrame.remove_stopwords, True, stopwords)
+        return self.__dataframe
+    
+    @staticmethod
+    def remove_stopwords(document, stopwords_list):
+        stopwords = stopwords_list
+        words = word_tokenize(document)
+        for w in words:
+            if w in stopwords:
+                words.remove(w)
+        return ' '.join(words)
+    
+    def add_random_series_column(self, column_name='random',min=0, max=100, distrubution_type='random', mean=0, sd=1):
+        if distrubution_type == 'random':
+            series = pd.Series(np.random.randint(min, max, self.get_shape()[0]))
+        elif distrubution_type == 'standard_normal':
+            series = pd.Series(np.random.standard_normal(self.get_shape()[0]))
+        elif distrubution_type == 'normal':
+            series = pd.Series(np.random.normal(mean, sd, self.get_shape()[0]))
+        else:
+            series = pd.Series(np.random.randn(self.get_shape()[0]))
+        self.add_column(series, column_name)
+        return self.__dataframe
+    
+    def drop_full_nan_columns(self):
+        for c in self.__dataframe.columns:
+                miss = self.__dataframe[c].isnull().sum()
+                missing_data_percent = round((miss/self.get_shape()[0])*100, 2)
+                if missing_data_percent == 100:
+                    self.drop_column(c)
+                    
+    def drop_columns_with_nan_threshold(self, threshold=0.5):
+        for c in self.__dataframe.columns:
+                miss = self.__dataframe[c].isnull().sum()
+                missing_data_percent = round((miss/self.get_shape()[0])*100, 2)
+                if missing_data_percent >= threshold*100:
+                    self.drop_column(c)
     
     def get_index(self, as_list=True):
         if as_list is True:
@@ -189,7 +244,7 @@ class DataFrame:
         self.__dataframe[column] = self.__dataframe[column].astype(column_type)
 
     def get_lines_columns(self, lines, columns):
-        if check_all_elements_type(columns, str):
+        if Lib.check_all_elements_type(columns, str):
             return self.get_dataframe().loc[lines, columns]
         return self.get_dataframe().iloc[lines, columns]
     
@@ -216,7 +271,7 @@ class DataFrame:
                 types[p] = str
             self.__dataframe = self.get_dataframe().astype(types)
         else:
-            self.get_dataframe().rename(columns=column_dict_or_all_list, inplace=True)
+            self.get_dataframe().rename(columns=column_dict_or_all_list, inplace=True) 
 
     def add_column(self, column, column_name):
         y = column
@@ -286,6 +341,11 @@ class DataFrame:
     def drop_columns(self, columns_names_as_list):
         for p in columns_names_as_list:
             self.__dataframe = self.__dataframe.drop(p, axis=1)
+        return self.__dataframe
+    
+    def reorder_columns(self, new_order_as_list):
+        self.__dataframe.reindex_axis(new_order_as_list, axis=1)
+        return self.__dataframe
             
     def keep_columns(self, columns_names_as_list):
         for p in self.get_columns_names():
@@ -457,7 +517,7 @@ class DataFrame:
         return self.__vectorizer.transform(np.reshape(self.get_column(column).iloc[-window_size:].to_numpy(), (window_size, 1)))
 
     def write_column_in_file(self, column, path='data/out.csv'):
-        write_liste_in_file(path, self.get_column(column).apply(str))
+        Lib.write_liste_in_file(path, self.get_column(column).apply(str))
 
     def check_duplicated_rows(self):
         return any(self.get_dataframe().duplicated())
@@ -466,11 +526,11 @@ class DataFrame:
         return any(self.get_column(column).duplicated())
 
     def write_check_duplicated_column_result_in_file(self, column, path='data/latin_comments.csv'):
-        write_liste_in_file(path, self.get_column(column).duplicated().apply(str))
+        Lib.write_liste_in_file(path, self.get_column(column).duplicated().apply(str))
 
     def write_files_grouped_by_column(self, column_index, dossier):
         for p in self.get_dataframe().values:
-            write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
+            Lib.write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
 
     def filter_dataframe(self, column, func_de_decision, in_place=True, *args):
         if in_place is True:
@@ -486,18 +546,36 @@ class DataFrame:
             else:
                 return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)]
 
-    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, *args):
-        if (len(args) != 0):
-            self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
+    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, in_place=True, *args):
+        """_summary_
+
+        Args:
+            column_to_trsform (_type_): column to transform
+            column_src (_type_): Column to use as a source for the transformation
+            fun_de_trasformation (_type_): The function of transformation, if it has multiple arguments pass them as args:
+            example: data.transform_column(column, column, Lib.remove_stopwords, True, stopwords)
+            in_place (bool, optional): If true the changes will affect the original dataframe. Defaults to True.
+
+        Returns:
+            _type_: _description_
+        """
+        if in_place is True:
+            if (len(args) != 0):
+                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
+            else:
+                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
         else:
-            self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
+            if (len(args) != 0):
+                return self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],))
+            else:
+                return self.get_column(column_src).apply(fun_de_trasformation)
             
     def to_no_accent_column(self, column):
-        self.trasform_column(column, column, no_accent)
+        self.trasform_column(column, column, Lib.no_accent)
         self.set_column(column, self.get_column(column))
 
     def write_dataframe_in_file(self, out_file='data/out.csv', delimiter=','):
-        write_liste_csv(self.get_dataframe().values, out_file, delimiter)
+        Lib.write_liste_csv(self.get_dataframe().values, out_file, delimiter)
 
     def sort(self, by_columns_list, ascending=False):
         self.set_dataframe(self.get_dataframe().sort_values(by=by_columns_list, ascending=ascending,
@@ -675,6 +753,10 @@ class DataFrame:
         self.set_column(column, pd.to_datetime(self.get_column(column)))
         self.set_column(column, self.get_column(column).dt.strftime(format))
         self.set_column(column, pd.to_datetime(self.get_column(column)))
+        
+    def reformat_date_time(self, date_time_column_name, new_format='%Y-%m-%d %H:%M'):
+        self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
+        return self.get_dataframe()
         
     def resample_timeseries(self, frequency='d', agg='mean'):
         if agg == 'sum':
