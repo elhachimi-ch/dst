@@ -331,18 +331,22 @@ class Lib:
 
     @staticmethod
     def remove_stopwords(document, language_or_stopwords_list='english'):
+        document = str.lower(document)
         if isinstance(language_or_stopwords_list, list) is True:
             stopwords = language_or_stopwords_list
         elif language_or_stopwords_list == 'arabic':
             stopwords = Lib.read_text_file_as_list('data/arabic_stopwords.csv')
+        elif language_or_stopwords_list == 'french':
+            stopwords = Lib.read_text_file_as_list('data/french_stopwords.csv')
         else:
             nltk.download('stopwords')
             stopwords = nltk.corpus.stopwords.words(language_or_stopwords_list)
         words = word_tokenize(document)
+        clean_words = []
         for w in words:
-            if w in stopwords:
-                words.remove(w)
-        return ' '.join(words)
+            if w not in stopwords:
+                clean_words.append(w)
+        return ' '.join(clean_words)
 
     @staticmethod
     def no_accent(string_in):

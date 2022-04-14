@@ -89,7 +89,7 @@ class DataFrame:
     def get_generator(self):
         return self.__generator
     
-    def remove_stopwords(self, column, language_or_stopwords_list='english'):
+    def remove_stopwords(self, column, language_or_stopwords_list='english', in_place=True):
         if isinstance(language_or_stopwords_list, list) is True:
             stopwords = language_or_stopwords_list
         elif language_or_stopwords_list == 'arabic':
@@ -97,17 +97,19 @@ class DataFrame:
         else:
             nltk.download('stopwords')
             stopwords = nltk.corpus.stopwords.words(language_or_stopwords_list)
-        self.transform_column(column, column, DataFrame.remove_stopwords, True, stopwords)
+        self.transform_column(column, column, DataFrame.remove_stopwords_lambda, in_place, stopwords)
         return self.__dataframe
     
     @staticmethod
-    def remove_stopwords(document, stopwords_list):
+    def remove_stopwords_lambda(document, stopwords_list):
+        document = str.lower(document)
         stopwords = stopwords_list
         words = word_tokenize(document)
+        clean_words = []
         for w in words:
-            if w in stopwords:
-                words.remove(w)
-        return ' '.join(words)
+            if w not in stopwords:
+                clean_words.append(w)
+        return ' '.join(clean_words)
     
     def add_random_series_column(self, column_name='random',min=0, max=100, distrubution_type='random', mean=0, sd=1):
         if distrubution_type == 'random':
