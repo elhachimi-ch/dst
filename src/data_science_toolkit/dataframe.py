@@ -364,7 +364,7 @@ class DataFrame:
     def group_by(self, column):
         self.set_dataframe(self.get_dataframe().groupby(column).count())
         
-    def check_missed_data(self, column=None):
+    def missing_data_checking(self, column=None):
         if column is not None:
             if any(pd.isna(self.get_dataframe()[column])) is True:
                 print("Missed data found in column " + column)
@@ -378,6 +378,9 @@ class DataFrame:
                     print("{} has {} missing value(s) which represents {}% of dataset size".format(c,miss, missing_data_percent))
                 else:
                     print("{} has NO missing value!".format(c))
+    
+    def missing_data_column_percent(self, column_name):
+        return self.__dataframe[column_name].isnull().sum()/self.get_shape()[0]
 
     def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None):
         if drop_row_if_nan_in_column is not None:
@@ -391,6 +394,11 @@ class DataFrame:
         if isinstance(row_index, int):
             return self.get_dataframe().iloc[row_index]
         return self.get_dataframe().loc[row_index]
+    
+    def set_row(self, column_name, row_index, new_value):
+        if isinstance(row_index, int):
+            self.__dataframe[column_name].iloc[row_index] = new_value
+        self.__dataframe[column_name].loc[row_index] = new_value
     
     def replace_column(self, column, pattern, replacement, regex=False, number_of_time=-1, case_sensetivity=False):
         self.set_column(column, self.get_column(column).str.replace(pattern, replacement, regex=regex, n=number_of_time,
