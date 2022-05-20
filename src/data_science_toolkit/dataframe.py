@@ -7,7 +7,6 @@ from sklearn.decomposition import PCA
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from zmq import has
 from .lib import Lib
 from .vectorizer import Vectorizer
 from wordcloud import WordCloud, STOPWORDS
@@ -334,11 +333,8 @@ class DataFrame:
         self.__dataframe = self.__dataframe.drop(column_name, axis=1)
         return self.__dataframe
         
-    def drop_index(self, drop=False):
-        if drop is True:
-            self.__dataframe.reset_index(drop=True, inplace=True) 
-        else:
-            self.__dataframe.reset_index(drop=False, inplace=True) 
+    def index_to_column(self):
+        self.__dataframe.reset_index(drop=False, inplace=True) 
         
     def drop_columns(self, columns_names_as_list):
         for p in columns_names_as_list:
@@ -764,15 +760,21 @@ class DataFrame:
         self.set_column(column, self.get_column(column).dt.strftime(format))
         self.set_column(column, pd.to_datetime(self.get_column(column)))
         
-    def reformat_date_time(self, date_time_column_name, new_format='%Y-%m-%d %H:%M'):
+    def date_time_formate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M'):
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
         return self.get_dataframe()
         
-    def resample_timeseries(self, frequency='d', agg='mean'):
-        if agg == 'sum':
-            self.set_dataframe(self.__dataframe.resample(frequency).sum())
-        if agg == 'mean':
-            self.set_dataframe(self.__dataframe.resample(frequency).mean())
+    def resample_timeseries(self, date_column_name='date', frequency='d', agg='mean', skip_rows=None, intitial_index=0, final_index=365, reset_index=False):
+        if skip_rows is not None:
+            self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:skip_rows])
+        else:
+            self.reindex_dataframe(date_column_name)
+            if agg == 'sum':
+                self.set_dataframe(self.__dataframe.resample(frequency).sum())
+            if agg == 'mean':
+                self.set_dataframe(self.__dataframe.resample(frequency).mean())
+        if reset_index is True:
+            self.reset_index()
         return self.get_dataframe()
         
     def to_time_series(self, date_column, value_column, date_format='%Y-%m-%d', window_size=2, one_row=False):
@@ -907,19 +909,17 @@ class DataFrame:
                                        line_index=self.get_index(),
                                        columns_names_as_list=column_names, 
                                        data_type='matrix').get_dataframe())
-            return self.get_dataframe()
         elif scaler_type == 'standard':
             self.__vectorizer = StandardScaler() 
             self.set_dataframe(self.__vectorizer.fit_transform(X=self.get_dataframe()))
-            return self.get_dataframe()
         elif scaler_type == 'adjusted_log':
             def log_function(o, min_column):
                 return np.log(1 + o - min_column)
             for name in self.get_columns_names():
                 min_column = self.get_column(name).min()
                 self.transform_column(name, name, log_function, min_column)
-            return self.get_dataframe()
-        
+        self.convert_dataframe_type()
+        return self.get_dataframe()
     def load_dataset(self, dataset='iris'):
         """
         boston: Load and return the boston house-prices dataset (regression)
