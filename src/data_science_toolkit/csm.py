@@ -1,9 +1,9 @@
 from math import exp
-from dataframe import DataFrame
+from .dataframe import DataFrame
 import numpy as np
 import matplotlib.pyplot as plt
 from pandas import Series
-from chart import Chart
+from .chart import Chart
 import seaborn as sns
 
 class CSM:
