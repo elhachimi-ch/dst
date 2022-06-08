@@ -22,6 +22,8 @@ import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 
 
+
+
 class DataFrame:
     """
     """
@@ -279,7 +281,10 @@ class DataFrame:
         if (not isinstance(column, pd.core.series.Series or not isinstance(column, pd.core.frame.DataFrame))):
             y = np.array(column)
             y = np.reshape(y, (y.shape[0],))
-            y = pd.Series(y, self.get_index())
+            if len(self.get_index()) == 0:
+                y = pd.Series(y)
+            else:
+                y = pd.Series(y, self.get_index())
         self.__dataframe[column_name] = y
         
     def add_transformed_columns(self, dest_column_name="new_column", transformation_rule="okk*2"):
@@ -378,13 +383,26 @@ class DataFrame:
     def missing_data_column_percent(self, column_name):
         return self.__dataframe[column_name].isnull().sum()/self.get_shape()[0]
 
-    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None):
-        if drop_row_if_nan_in_column is not None:
+    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None, method='ffill'):
+        if filling_dict_colmn_val is None and drop_row_if_nan_in_column is None:
+            if method == 'ffill':
+                self.get_dataframe().fillna(method='pad', inplace=True)
+            elif method == 'bfill':
+                self.get_dataframe().fillna(method='backfill', inplace=True)
+        
+        if filling_dict_colmn_val is not None:
+            self.get_dataframe().fillna(filling_dict_colmn_val, inplace=True)
+            
+        if drop_row_if_nan_in_column == 'all':
+            for p in self.get_columns_names():
+                self.set_dataframe(self.__dataframe[self.__dataframe[p].notna()])
+        else:
             # a = a[~(np.isnan(a).all(axis=1))] # removes rows containing all nan
             self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
             #self.__dataframe = self.__dataframe[~(np.isnan(self.__dataframe).any(axis=1))] # removes rows containing at least one nan
-        else:
-            self.get_dataframe().fillna(filling_dict_colmn_val, inplace=True)
+          
+       
+            
         
     def get_row(self, row_index):
         if isinstance(row_index, int):
@@ -441,8 +459,11 @@ class DataFrame:
         # append dataset contents data_sets must have the same columns names
         self.__dataframe = self.__dataframe.append(dataframe)
 
-    def intersection(self, dataframe, column):
-        self.__dataframe = pd.merge(self.__dataframe, dataframe, on=column, how='inner')
+    def join(self, dataframe, on_column='index'):
+        if on_column == 'index':
+           self.__dataframe = pd.merge(self.get_dataframe(), dataframe, left_index=True, right_index=True)
+        else:
+            self.__dataframe = pd.merge(self.__dataframe, dataframe, on=on_column, how='inner')
 
     def left_join(self, dataframe, column):
         self.__dataframe = pd.merge(self.__dataframe, dataframe, on=column, how='left')
@@ -695,7 +716,7 @@ class DataFrame:
 
     def show(self, number_of_row=None):
         if number_of_row is None:
-            print(self.get_dataframe())
+            return self.get_dataframe()
         elif number_of_row < 0:
             return self.get_dataframe().tail(abs(number_of_row)) 
         else:
@@ -764,15 +785,19 @@ class DataFrame:
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
         return self.get_dataframe()
         
-    def resample_timeseries(self, date_column_name='date', frequency='d', agg='mean', skip_rows=None, intitial_index=0, final_index=365, reset_index=False):
+    def resample_timeseries(self, date_column_name='date', frequency='d', agg='mean', skip_rows=None, intitial_index=0, reset_index=False):
         if skip_rows is not None:
-            self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:skip_rows])
+            self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
         else:
             self.reindex_dataframe(date_column_name)
             if agg == 'sum':
                 self.set_dataframe(self.__dataframe.resample(frequency).sum())
             if agg == 'mean':
                 self.set_dataframe(self.__dataframe.resample(frequency).mean())
+            if agg == 'ffill':
+                self.set_dataframe(self.__dataframe.resample(frequency).ffill())
+            if agg == 'bfill':
+                self.set_dataframe(self.__dataframe.resample(frequency).bfill())
         if reset_index is True:
             self.reset_index()
         return self.get_dataframe()

@@ -34,14 +34,15 @@ from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifi
 
 
 
+
 class Model:
     def __init__(
         self, 
         data_x=None, 
         data_y=None, 
-        model_type='knn', 
-        task='c',
-        training_percent=1, 
+        model_type='xb', 
+        task='r',
+        training_percent=0.8, 
         epochs=50, 
         batch_size=32, 
         generator=None,
@@ -61,12 +62,13 @@ class Model:
         self.y = data_y
         self.__y_pred = None
         self.__epochs = epochs
+        self.__model_type = model_type
         self.__batch_size = batch_size
         self.__model_type = model_type
         self.__boosted_model = None
         self.__generator = generator
         self.history = 'None'
-        self.__c_or_r_ts = task
+        self.__task = task
         self.__validation_percentage = validation_percentage
         
         if model_type == 'dt':
@@ -240,7 +242,7 @@ class Model:
                 self.history = self.__model.fit(self.x, self.y, epochs=self.__epochs,
                                         batch_size=self.__batch_size, validation_split=self.__validation_percentage)
                 print(self.history.history)
-                self.__y_pred = self.__model.predict(self.__x_test)
+                #self.__y_pred = self.__model.predict(self.__x_test)
         else:
             self.__model.fit(self.__x_train, self.__y_train)
             self.__y_pred = self.__model.predict(self.__x_test)
@@ -308,6 +310,7 @@ class Model:
         if not np.any(self.__y_test<=0) or not np.any(self.__y_pred<=0):
             return {
                 'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
+                'R': np.corrcoef(self.__y_test, self.__y_pred)[0][1],
                 'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
                 'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
                 'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
@@ -315,6 +318,7 @@ class Model:
             }
         return {
                 'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
+                'R': np.corrcoef(self.__y_test, self.__y_pred)[0][1],
                 'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
                 'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
                 'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
@@ -343,7 +347,7 @@ class Model:
         plt.ylabel('True Positive Rate(Sensitivity)')
         plt.title('ROC Curve')
         plt.legend(loc='upper left')
-        plt.show()
+        plt.show() 
 
     def boost_model(self):
         ada_boost = AdaBoostClassifier(n_estimators=100, base_estimator=self.__model, learning_rate=0.1, random_state=0)
@@ -361,7 +365,7 @@ class Model:
 
     def report(self):
         if self.__model_type == 'dl':
-            if self.__c_or_r_ts == 'ts' or self.__c_or_r_ts == 'r':
+            if self.__task == 'ts' or self.__task == 'r':
                 if self.__validation_percentage == 0:
                     loss = self.history.history['loss']
                     x = range(1, len(loss) + 1)
@@ -391,7 +395,7 @@ class Model:
                 print(self.regression_report()) 
                 plt.show()
                 
-            elif self.__c_or_r_ts == 'c':
+            elif self.__task == 'c':
                 if self.__validation_percentage == 0:
                     acc = self.history.history['accuracy']
                     loss = self.history.history['loss']
@@ -423,26 +427,122 @@ class Model:
                     plt.title('Training and validation loss')
                     plt.legend()
         else:
-            if self.__c_or_r_ts == 'r':
+            if self.__task == 'r':
                 print(self.regression_report()) 
             else:
                 print(self.classification_report()) 
+
+        return self.regression_report()
+
                 
-    def cross_validation(self, k):
-        """https://scikit-learn.org/stable/modules/model_evaluation.html#scoring-parameter"""
-        # scoring = "neg_mean_squared_error"
-        if self.__c_or_r_ts == 'r':
-            scoring = "r2" 
-        elif self.__c_or_r_ts == 'c':
-            scoring = "accuracy"
-        print(cross_val_score(self.__model, self.x, self.y, cv=k, scoring=scoring))
+    def cross_validation(self, k=5, metric='r2'):
+        """Cross validation
+
+        Args:
+            k (_type_): number of folds
+            metric (str, optional): scoring metric to use. Defaults to 'r2'.
+            examples:
+            
+            For Regression
+            'explained_variance'
+            'max_error'
+            'neg_mean_absolute_error'
+            'neg_mean_squared_error'
+            'neg_root_mean_squared_error'
+            'neg_mean_squared_log_error'
+            'neg_median_absolute_error'
+            'r2'
+            'neg_mean_poisson_deviance'
+            'neg_mean_gamma_deviance'
+            'neg_mean_absolute_percentage_error'
+
+            For Classification
+            'accuracy'
+            'balanced_accuracy'
+            'top_k_accuracy'
+            'average_precision'
+            'neg_brier_score'
+            'f1'
+            'f1_micro'
+            'f1_macro'
+            'f1_weighted'
+            'f1_samples'
+            'neg_log_loss'
+            'precision' 
+            'recall' 
+            'jaccard' 
+            'roc_auc'
+            'roc_auc_ovr'
+            'roc_auc_ovo'
+            'roc_auc_ovr_weighted'
+            'roc_auc_ovo_weighted'
+
+            For Clustering
+            'adjusted_mutual info score'
+            'adjusted_rand_score'
+            'completeness_score'
+            'fowlkes_mallows_score'
+            'homogeneity_score'
+            'mutual_info_score'
+            'normalized_mutual_info_score'
+            'rand_score'
+            'v_measure_score'
+        """
         
-    def get_features_importance(self):
-        if self.__c_or_r_ts == 'r':
+        if self.__model_type == 'dl':
+            cross_val_score_list = []
+            X = ["a", "a", "a", "b", "b", "c", "c", "c", "c", "c"]
+            k_fold = KFold(n_splits=k)
+            for train_indices, test_indices in k_fold.split(X):
+                print('Train: %s | test: %s' % (train_indices, test_indices))
+                
+            for train, test in k_fold.split(X_digits):
+                model.train(x[train],y[train])
+                model.predict()
+                cross_val_score_list.append(model.classification_report())
+        else:
+            
+            if self.__task == 'r':
+                scoring = "r2" 
+                r2_results = cross_val_score(self.__model, self.x, self.y, cv=k, scoring='r2')
+                rmse_results = cross_val_score(self.__model, self.x, self.y, cv=k, scoring='neg_mean_squared_error')
+                result = DataFrame()
+                result.add_column([i for i in range(1, k+1)], 'Folds')
+                result.add_column(r2_results, 'R2')
+                result.add_column(rmse_results, 'RMSE')
+                result.transform_column('RMSE', 'RMSE', lambda x: -x)
+            elif self.__task == 'c':
+                scoring = "accuracy"
+            
+            return result.get_dataframe()
+        
+    def get_features_importance(self, features_nbr=10, savefig=False, figure_name='output.png'):
+        if self.__task == 'r':
             etr_model = ExtraTreesRegressor()
             etr_model.fit(self.x,self.y)
             feature_imp = pd.Series(etr_model.feature_importances_,index=self.x.columns)
-            feature_imp.nlargest(10).plot(kind='barh')
+           
+            # old version
+            #feature_imp.nlargest(10).plot(kind='barh')
+            
+            sns.set_theme(style="whitegrid")
+            # Initialize the matplotlib figure
+            f, ax = plt.subplots()
+            
+
+
+            # Plot the total crashes
+            #sns.set_color_codes("pastel")
+            sns.barplot(x=feature_imp.nlargest(features_nbr).index, y=feature_imp.nlargest(features_nbr),
+                        palette="Spectral")
+
+            # Add a legend and informative axis label
+            plt.xlabel('Features', fontsize=15)
+            plt.ylabel('Importance score', fontsize=15)
+            plt.xticks(fontsize=11)
+            plt.yticks(fontsize=11)
+            if savefig is True:
+                plt.savefig(figure_name, dpi=300, bbox_inches='tight')
             plt.show()
         else:
             etr_model = ExtraTreesClassifier()
@@ -450,6 +550,7 @@ class Model:
             feature_imp = pd.Series(etr_model.feature_importances_,index=[i for i in range(self.x.shape[1])])
             feature_imp.nlargest(10).plot(kind='barh')
             plt.show()
+            
             """model = self.__model # or XGBRegressor
             plot_importance(model, importance_type = 'gain') # other options available
             plt.show()
@@ -489,6 +590,44 @@ class Model:
         plt.legend(loc='best')
         plt.xlabel('X')
         plt.ylabel('target value')
+        
+    def fine_tune(self, dict_params=None, n_trials=10):
+        def objective(trial):
+            if self.__model_type == "svm":
+                kernels = ['linear', 'poly', 'rbf', 'sigmoid']
+                svm_c = trial.suggest_float("svm_c", 1e-10, 1e10, log=True)
+                svm_kernel = trial.suggest_categorical("svm_kernel", kernels)
+                self.__model = svm.SVR(C=svm_c, 
+                                                kernel=svm_kernel, 
+                                                gamma="auto")
+            elif self.__model_type == "xb":
+                boosters = ['gbtree', 'gblinear', 'dart']
+                xb_eta = trial.suggest_float("xb_eta", 0.1, 1, step=0.01)
+                xb_max_depth = trial.suggest_int("xb_max_depth", 2, 32, log=True)
+                xb_booster = trial.suggest_categorical("xb_booster", boosters)
+                self.__model = XGBRegressor(
+                    eta=xb_eta,
+                    max_depth=xb_max_depth,
+                    booster=xb_booster,
+                )
+            elif self.__model_type == "rf":
+                rf_max_depth = trial.suggest_int("rf_max_depth", 2, 32, log=True)
+                rf_nbr_trees = trial.suggest_int("rf_nbr_trees", 100, 1000, log=True)
+                self.__model = RandomForestRegressor(
+                    max_depth=rf_max_depth,
+                    n_estimators=rf_nbr_trees,
+                )
+            return self.cross_validation(3)['RMSE'].mean()
+        
+        if dict_params is None:
+            # minimize or maximize
+            study = optuna.create_study(direction="minimize")
+            study.optimize(objective, n_trials=n_trials)
+            print(study.best_trial)
+        data = DataFrame(study.trials_dataframe(), data_type='df')
+        data.drop_columns(['number', 'datetime_start', 'datetime_complete', 'duration', 'state'])
+        
+        return data.get_dataframe()
         
     @staticmethod
     def r2_keras(y_true, y_pred):
