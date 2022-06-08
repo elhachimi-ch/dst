@@ -1,9 +1,9 @@
 import gym
 import numpy as np
 from .dataframe import DataFrame
-from gis import GIS
+from .gis import GIS
 import re
-from csm import CSM
+from .csm import CSM
 
 
 class R3(gym.Env): 
