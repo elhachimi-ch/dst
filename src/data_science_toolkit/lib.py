@@ -7,7 +7,7 @@ from time import sleep
 import math
 import numpy as np
 import unidecode
-from emoji import UNICODE_EMOJI
+from emoji import EMOJI_DATA
 from textblob import TextBlob
 #from stringdist.pystringdist.levenshtein import levenshtein as ed
 import nltk
