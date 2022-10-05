@@ -23,7 +23,6 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 
 
 
-
 class DataFrame:
     """
     """
@@ -290,6 +289,11 @@ class DataFrame:
     def add_transformed_columns(self, dest_column_name="new_column", transformation_rule="okk*2"):
         columns_names = self.get_columns_names()
         columns_dict = {}
+        operations = {'sqrt': sqrt, 
+         'pow': power,
+         'exp': exp,
+         }
+        columns_dict.update(operations)
         for column_name in columns_names:
             if column_name in transformation_rule:
                 columns_dict.update({column_name: self.get_column(column_name)})
@@ -362,8 +366,11 @@ class DataFrame:
     def pivot(self, index_columns_as_list, column_columns_as_list, column_of_values, agg_func):
         return self.get_dataframe().pivot_table(index=index_columns_as_list, columns=column_columns_as_list, values=column_of_values, aggfunc=agg_func)
 
-    def group_by(self, column):
-        self.set_dataframe(self.get_dataframe().groupby(column).count())
+    def group_by(self, column_name):
+        self.set_dataframe(self.get_dataframe().groupby(column_name).count())
+        
+    def get_nan_indexes_of_column(self, column_name):
+        return list(self.get_dataframe().loc[pd.isna(self.get_column(column_name)), :].index)
         
     def missing_data_checking(self, column=None):
         if column is not None:
@@ -382,28 +389,173 @@ class DataFrame:
     
     def missing_data_column_percent(self, column_name):
         return self.__dataframe[column_name].isnull().sum()/self.get_shape()[0]
+    
+    def get_missing_data_indexes_in_column(self, column_name):
+        return self.__dataframe[self.__dataframe[column_name].isnull()].index.tolist()
 
-    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None, method='ffill'):
+    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None, method='ffill',
+                     column_to_fill='Ta', date_column_name=None):
         if filling_dict_colmn_val is None and drop_row_if_nan_in_column is None:
             if method == 'ffill':
                 self.get_dataframe().fillna(method='pad', inplace=True)
             elif method == 'bfill':
                 self.get_dataframe().fillna(method='backfill', inplace=True)
+            elif method == 'era5_land':
+                if column_to_fill == 'Ta':
+                    era5_land_variables = ['2m_temperature']
+                elif column_to_fill == 'Hr':
+                    era5_land_variables = ['2m_temperature', '2m_dewpoint_temperature']
+                elif column_to_fill == 'Rg':
+                    era5_land_variables = ['surface_solar_radiation_downwards']
+                
+                from gis import GIS
+                import cdsapi
+                c = cdsapi.Client()
+
+                if date_column_name is not None:
+                   self.reindex_dataframe(date_column_name)
+
+                indexes = []
+                for p in self.get_missing_data_indexes_in_column(column_to_fill):
+                    if isinstance(p, str) is True:
+                        indexes.append(datetime.datetime.strptime(p, '%Y-%m-%d %H:%M:%S'))
+                    else:
+                        indexes.append(p)
+                    
+                    
+                years = set()
+                for p in indexes:
+                    years.add(p.year)     
+                    
+                years = list(years)
+                print("Found missing data for {} in year(s): {}".format(column_to_fill, years))  
+                for y in years:
+                    missing_data_dict = {}
+                    missing_data_dict['month'] = set()   
+                    missing_data_dict['day'] = set() 
+                    for p in indexes:
+                        if p.year == y:
+                            missing_data_dict['month'].add(p.strftime('%m'))
+                            missing_data_dict['day'].add(p.strftime('%d'))
+                    missing_data_dict['month'] = list(missing_data_dict['month'])
+                    missing_data_dict['day'] = list(missing_data_dict['day'])
+
+                    if os.path.exists("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib") is False:
+                        c.retrieve(
+                            'reanalysis-era5-land',
+                            {
+                                'format': 'grib',
+                                'variable': era5_land_variables,
+                                'year': str(y),
+                                'month':  missing_data_dict['month'],
+                                'day': missing_data_dict['day'],
+                                'time': [
+                                    '00:00', '01:00', '02:00',
+                                    '03:00', '04:00', '05:00',
+                                    '06:00', '07:00', '08:00',
+                                    '09:00', '10:00', '11:00',
+                                    '12:00', '13:00', '14:00',
+                                    '15:00', '16:00', '17:00',
+                                    '18:00', '19:00', '20:00',
+                                    '21:00', '22:00', '23:00',
+                                ],
+                                'area': [
+                                    31.79, -7.59, 31.6,
+                                    -7.5,
+                                ],
+                            },
+                            'era5_r3_' + column_to_fill + '_' + str(y) +'.grib')
+                
+                gis = GIS()
+
+                data = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(years[0]) + ".grib", "ta"),
+                                data_type="df")
+                data.reset_index()
+                data.resample_timeseries(skip_rows=2)
+                data.reindex_dataframe("valid_time")
+                if column_to_fill == 'Ta':
+                    data.keep_columns(['t2m'])
+                    for y in years[1:]:
+                        data_temp = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib", "ta"),
+                                            data_type='df')
+                        data_temp.reset_index()
+                        data_temp.resample_timeseries(skip_rows=2)
+                        data_temp.reindex_dataframe("valid_time")
+                        data_temp.keep_columns(['t2m'])
+                        data.append_dataframe(data_temp.get_dataframe())
+                    
+                    data.transform_column('t2m', 't2m', lambda o: o - 273.15)
+                    nan_indices = self.get_nan_indexes_of_column(column_to_fill)
+                    for p in nan_indices:
+                        self.set_row('Ta', p, data.get_row(p)['t2m'])
+                    print('Imputation of missing data for Ta from ERA5-Land was done!')
+                    
+                elif column_to_fill == 'Hr':
+                    data.keep_columns(['t2m', 'd2m'])
+                    for y in years[1:]:
+                        data_temp = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib", "ta"),
+                                            data_type='df')
+                        data_temp.reset_index()
+                        data_temp.resample_timeseries(skip_rows=2)
+                        data_temp.reindex_dataframe("valid_time")
+                        data_temp.keep_columns(['t2m', 'd2m'])
+                        data.append_dataframe(data_temp.get_dataframe())
+                    data.transform_column('t2m', 't2m', lambda o: o - 273.15)
+                    data.transform_column('d2m', 'd2m', lambda o: o - 273.15)
+                    data.add_transformed_columns('era5_hr', '100*exp(-((243.12*17.62*t2m)-(d2m*17.62*t2m)-d2m*17.62*(243.12+t2m))/((243.12+t2m)*(243.12+d2m)))')
+                    nan_indices = self.get_missing_data_indexes_in_column(column_to_fill)
+                    for p in nan_indices:
+                        self.set_row('Hr', p, data.get_row(p)['era5_hr'])
+                    
+                    print('Imputation of missing data for Hr from ERA5-Land was done!')
+                elif column_to_fill == 'Rg':
+                    data.keep_columns(['ssrd'])
+                    for y in years[1:]:
+                        data_temp = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib", "ta"),
+                                            data_type='df')
+                        data_temp.reset_index()
+                        data_temp.resample_timeseries(skip_rows=2)
+                        data_temp.reindex_dataframe("valid_time")
+                        data_temp.keep_columns(['ssrd'])
+                        data.append_dataframe(data_temp.get_dataframe())
+                    
+                    
+                    l = []
+                    for p in data.get_index():
+                        if p.hour == 1:
+                            new_value = data.get_row(p)['ssrd']/3600
+                        else:
+                            try:
+                                previous_hour = data.get_row(p-timedelta(hours=1))['ssrd']
+                            except KeyError: # if age is not convertable to int
+                                previous_hour = data.get_row(p)['ssrd']
+                                
+                            new_value = (data.get_row(p)['ssrd'] - previous_hour)/3600
+                        l.append(new_value)
+
+                    data.add_column(l, 'rg')
+                    data.keep_columns(['rg'])
+                    data.rename_columns({'rg': 'ssrd'})
+                    data.transform_column('ssrd', 'ssrd', lambda o : o if abs(o) < 1500 else 0 )    
+                    data.export('rg.csv', index=True)
+                    nan_indices = self.get_nan_indexes_of_column(column_to_fill)
+                    for p in nan_indices:
+                        self.set_row('Rg', p, data.get_row(p)['ssrd'])
+                    
+                    print('Imputation of missing data for Rg from ERA5-Land was done!')
         
         if filling_dict_colmn_val is not None:
             self.get_dataframe().fillna(filling_dict_colmn_val, inplace=True)
             
-        if drop_row_if_nan_in_column == 'all':
-            for p in self.get_columns_names():
-                self.set_dataframe(self.__dataframe[self.__dataframe[p].notna()])
-        else:
-            # a = a[~(np.isnan(a).all(axis=1))] # removes rows containing all nan
-            self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
-            #self.__dataframe = self.__dataframe[~(np.isnan(self.__dataframe).any(axis=1))] # removes rows containing at least one nan
+        if drop_row_if_nan_in_column is not None:
+            if drop_row_if_nan_in_column == 'all':
+                for p in self.get_columns_names():
+                    self.set_dataframe(self.__dataframe[self.__dataframe[p].notna()])
+            else:
+                # a = a[~(np.isnan(a).all(axis=1))] # removes rows containing all nan
+                self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
+                #self.__dataframe = self.__dataframe[~(np.isnan(self.__dataframe).any(axis=1))] # removes rows containing at least one nan
           
-       
-            
-        
     def get_row(self, row_index):
         if isinstance(row_index, int):
             return self.get_dataframe().iloc[row_index]
@@ -643,6 +795,12 @@ class DataFrame:
     def count_true_decision_function_rows(self, column, decision_function):
         self.filter_dataframe(column, decision_function)
         
+    def split_export(self, percentage=0.8, train_out_file="train.csv", test_out_file="test.csv"):
+        train = self.__dataframe.iloc[:int(percentage*self.get_shape()[0]), :]
+        test = self.__dataframe.iloc[int(percentage*self.get_shape()[0]):, :]
+        train.to_csv(train_out_file, index=False)
+        test.to_csv(test_out_file, index=False) 
+        
     def show_wordcloud(self, column):
         wordcloud = WordCloud(
             background_color='white',
@@ -671,12 +829,18 @@ class DataFrame:
         header = list(self.get_dataframe().columns)
         return header 
     
-    def export(self, destination_path='data/json_dataframe.csv', type='csv'):
+    def export_column(self, column_name, out_file='out.csv'):
+        self.get_column(column_name).to_csv(out_file, index=False)
+    
+    def export(self, destination_path='data/json_dataframe.csv', type='csv', index=False):
         if type == 'json':
             destination_path='data/json_dataframe.json'
             self.get_dataframe().to_json(destination_path)
-            return 0
-        self.get_dataframe().to_csv(destination_path)
+        elif type == 'csv':
+            self.get_dataframe().to_csv(destination_path, index=index)
+        elif type == 'pkl':
+            self.get_dataframe().to_pickle(destination_path)
+        print('DataFrame exported successfully to /' + destination_path)
         
     def sample(self, n=10, frac=None):
         if frac is not None:
@@ -785,7 +949,7 @@ class DataFrame:
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
         return self.get_dataframe()
         
-    def resample_timeseries(self, date_column_name='date', frequency='d', agg='mean', skip_rows=None, intitial_index=0, reset_index=False):
+    def resample_timeseries(self, date_column_name='date_time', frequency='d', agg='mean', skip_rows=None, intitial_index=0, reset_index=False):
         if skip_rows is not None:
             self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
         else:
@@ -865,18 +1029,6 @@ class DataFrame:
         """
         self.set_dataframe(self.get_dataframe().drop(indexes_as_list))
         
-    def save(self, path=None):
-        """Save a dataframe in pkl format for future use
-
-        Args:
-            path ([type], optional): link and name of storage file. If set to None, it will be dataframe.pkl.
-        """
-        if path is None:
-            self.get_dataframe().to_pickle("dataframe.pkl")
-        else:
-            self.get_dataframe().to_pickle(path)
-            
-        
     def dataframe_skip_columns(self, intitial_index, final_index, step=2):
         self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:step])
         
@@ -945,6 +1097,7 @@ class DataFrame:
                 self.transform_column(name, name, log_function, min_column)
         self.convert_dataframe_type()
         return self.get_dataframe()
+    
     def load_dataset(self, dataset='iris'):
         """
         boston: Load and return the boston house-prices dataset (regression)
@@ -964,7 +1117,19 @@ class DataFrame:
             x = data.data
             y = data.target
             self.set_dataframe(x)
-            self.add_column(y,'target')            
+            self.add_column(y,'target')  
+            
+    def similarity_measure_as_column(self, column_name1, column_name2, similarity_method='cosine', weighting_method='tfidf'):
+        if similarity_method == 'cosine':
+            corpus = self.get_column_as_list(column_name1) + self.get_column_as_list(column_name2)
+            vectorizer = Vectorizer(corpus, weighting_method)
+            new_column = []
+            for p in zip(self.get_column_as_list(column_name1), self.get_column_as_list(column_name2)):
+                new_column.append(vectorizer.cosine_similarity(p[0], p[1])) 
+            
+            self.add_column(new_column, 'Similarity score')
+        
+        return self.get_dataframe()
         
     @staticmethod
     def outliers_decision_function(o, min_quantile, max_quantile):

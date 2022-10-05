@@ -6,6 +6,7 @@ from tensorflow.keras.utils import to_categorical
 from .lib import Lib
 from sklearn.preprocessing import MinMaxScaler
 import nltk
+from sklearn.metrics.pairwise import cosine_similarity
 
 class Vectorizer:
     __vectorizer = None
@@ -53,6 +54,12 @@ class Vectorizer:
 
     def get_features_names(self):
         return self.__vectorizer.get_feature_names()
+    
+    def cosine_similarity(self, document1, document2):
+        similarity_score = cosine_similarity(
+            self.get_docs_projections_as_sparse([document1]),
+            self.get_docs_projections_as_sparse([document2]))
+        return similarity_score
 
     @staticmethod
     def tokenizer(doc):
@@ -83,10 +90,10 @@ class Vectorizer:
             'l3': e[-3:],
         }
 
-    def get_docs_projections_as_sparse(self, documents_as_liste, projection_type='normal'):
+    def get_docs_projections_as_sparse(self, documents_as_list, projection_type='normal'):
         if projection_type != 'normal':
             documents_as_liste = np.vectorize(Vectorizer.get_custom_features)(documents_as_liste)
-        return self.__vectorizer.transform(documents_as_liste)
+        return self.__vectorizer.transform(documents_as_list)
 
     def save_vectorizer(self, vectorizer_path='data/vectorizer.data'):
         out_vectorizer_file = open(vectorizer_path, 'wb')
