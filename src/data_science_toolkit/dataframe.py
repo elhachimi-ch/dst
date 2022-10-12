@@ -725,13 +725,13 @@ class DataFrame:
             else:
                 return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)]
 
-    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, in_place=True, *args):
+    def transform_column(self, column_to_transform, column_src, transformation_function, in_place=True, *args):
         """_summary_
 
         Args:
-            column_to_trsform (_type_): column to transform
+            column_to_transform (_type_): column to transform
             column_src (_type_): Column to use as a source for the transformation
-            fun_de_trasformation (_type_): The function of transformation, if it has multiple arguments pass them as args:
+            transformation_function (_type_): The function of transformation, if it has multiple arguments pass them as args:
             example: data.transform_column(column, column, Lib.remove_stopwords, True, stopwords)
             in_place (bool, optional): If true the changes will affect the original dataframe. Defaults to True.
 
@@ -740,14 +740,14 @@ class DataFrame:
         """
         if in_place is True:
             if (len(args) != 0):
-                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
+                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function, args=(args[0],)))
             else:
-                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
+                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function))
         else:
             if (len(args) != 0):
-                return self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],))
+                return self.get_column(column_src).apply(transformation_function, args=(args[0],))
             else:
-                return self.get_column(column_src).apply(fun_de_trasformation)
+                return self.get_column(column_src).apply(transformation_function)
             
     def to_no_accent_column(self, column):
         self.trasform_column(column, column, Lib.no_accent)
@@ -777,7 +777,7 @@ class DataFrame:
     def count_occurence_of_row_as_count_column(self, column):
         column_name = 'count'
         self.set_column(column_name, self.get_column(column).value_counts())
-        self.trasform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
+        self.transform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
     
     def get_count_number_of_all_words(self, column):
         self.apply_fun_to_column(column, lambda x: len(x.split(' ')))

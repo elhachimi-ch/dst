@@ -1,7 +1,17 @@
+.gitignore
+.readthedocs.yaml
 LICENSE
 README.md
 pyproject.toml
+requirements.txt
 setup.py
+setupp.cfg
+docs/conf.py
+docs/dst.rst
+docs/index.rst
+docs/modules.rst
+docs/requirements.txt
+media/dst_logo.png
 src/data_science_toolkit/__init__.py
 src/data_science_toolkit/chart.py
 src/data_science_toolkit/csm.py
@@ -19,4 +29,5 @@ src/data_science_toolkit.egg-info/SOURCES.txt
 src/data_science_toolkit.egg-info/dependency_links.txt
 src/data_science_toolkit.egg-info/requires.txt
 src/data_science_toolkit.egg-info/top_level.txt
+test/kitchen.py
 test/test.py
