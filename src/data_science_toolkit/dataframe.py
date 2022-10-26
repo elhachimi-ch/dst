@@ -360,8 +360,13 @@ class DataFrame:
                 self.__dataframe = self.__dataframe.drop(p, axis=1)
         return self.__dataframe
 
-    def add_row(self, row_as_dict):
-        self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
+    def add_row(self, row_as_dict, index=None):
+        if index is not None:
+            row = pd.DataFrame(row_as_dict, index=[index])
+            self.__dataframe = pd.concat([self.__dataframe.iloc[:index], row, self.__dataframe.iloc[index:]]).reset_index(drop=True)
+            #self.reset_index()
+        else:
+            self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
 
     def pivot(self, index_columns_as_list, column_columns_as_list, column_of_values, agg_func):
         return self.get_dataframe().pivot_table(index=index_columns_as_list, columns=column_columns_as_list, values=column_of_values, aggfunc=agg_func)
