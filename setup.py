@@ -6,7 +6,11 @@ with open("README.md", "r", encoding="utf-8") as fh:
     
 setuptools.setup(
     name="data-science-toolkit",
+<<<<<<< HEAD
     version="0.0.988",
+=======
+    version="0.0.993",
+>>>>>>> 0a9024c95de3591a976967d81b9bba573e7a0139
     author="EL HACHIMI CHOUAIB",
     author_email="elhachimi.ch@gmail.com",
     description="Data Science Toolkit (DST) is a Python library that helps implement data science related project with ease.",

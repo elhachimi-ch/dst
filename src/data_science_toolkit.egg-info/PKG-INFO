@@ -1,11 +1,17 @@
 Metadata-Version: 2.1
 Name: data-science-toolkit
+<<<<<<< HEAD
 Version: 0.0.988
+=======
+Version: 0.0.993
+>>>>>>> 0a9024c95de3591a976967d81b9bba573e7a0139
 Summary: Data Science Toolkit (DST) is a Python library that helps implement data science related project with ease.
 Home-page: https://github.com/elhachimi-ch/dst
 Author: EL HACHIMI CHOUAIB
 Author-email: elhachimi.ch@gmail.com
+License: UNKNOWN
 Project-URL: Bug Tracker, https://github.com/elhachimi-ch/dst/issues
+Platform: UNKNOWN
 Classifier: Programming Language :: Python :: 3
 Classifier: License :: OSI Approved :: MIT License
 Classifier: Operating System :: OS Independent
@@ -60,4 +66,6 @@ Contrubution and suggestions are welcome via GitHub Pull Requests.
 We're actively enhacing the repo with new algorithms.
 
 ### How to cite
+
+
 
