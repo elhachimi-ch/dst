@@ -22,7 +22,6 @@ import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 
 
-
 class DataFrame:
     """
     """
@@ -30,12 +29,15 @@ class DataFrame:
     __generator = None
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
+                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1',
+                 skip_rows=None
+                 ):
         if data_link is not None:
             if data_type == 'csv':
                 if has_header is True:
                     self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
-                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False)
+                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False,
+                                               skiprows=skip_rows)
                 else:
                     self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
                                                low_memory=False, error_bad_lines=False, skip_blank_lines=False,
@@ -43,7 +45,8 @@ class DataFrame:
             elif data_type == 'json':
                 self.__dataframe = pd.read_json(data_link, encoding='utf-8')
             elif data_type == 'xls':
-                self.__dataframe = pd.read_excel(data_link, sheet_name=sheet_name)
+                self.__dataframe = pd.read_excel(data_link, sheet_name=sheet_name,
+                                                 skiprows=skip_rows)
             elif data_type == 'pkl':
                 self.__dataframe = pd.read_pickle(data_link)
             elif data_type == 'dict':
@@ -323,7 +326,15 @@ class DataFrame:
 
     def to_upper_column(self, column):
         self.set_column(column, self.get_column(column).str.upper())
-
+        
+    def combine_date_and_time_columns(self, 
+                                      date_column_name='date', 
+                                      time_column_name='time', 
+                                      new_date_time_column_name='date_time',
+                                      date_time_format='%Y-%m-%d %H:%M:%S'):
+        self.add_column(self.get_column(date_column_name).astype(str) + ' ' + self.get_column(time_column_name).astype(str), new_date_time_column_name)
+        self.column_to_date(new_date_time_column_name, format=date_time_format)
+        
     def to_lower_column(self, column):
         self.set_column(column, self.get_column(column).str.lower())
 
@@ -398,7 +409,7 @@ class DataFrame:
     def get_missing_data_indexes_in_column(self, column_name):
         return self.__dataframe[self.__dataframe[column_name].isnull()].index.tolist()
 
-    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None, method='ffill',
+    def missing_data(self, drop_row_if_nan_in_column=None, filling_dict_colmn_val=None, method='ffill',
                      column_to_fill='Ta', date_column_name=None):
         if filling_dict_colmn_val is None and drop_row_if_nan_in_column is None:
             if method == 'ffill':
@@ -561,6 +572,9 @@ class DataFrame:
                 self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
                 #self.__dataframe = self.__dataframe[~(np.isnan(self.__dataframe).any(axis=1))] # removes rows containing at least one nan
           
+       
+            
+        
     def get_row(self, row_index):
         if isinstance(row_index, int):
             return self.get_dataframe().iloc[row_index]
@@ -716,27 +730,27 @@ class DataFrame:
         for p in self.get_dataframe().values:
             Lib.write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
 
-    def filter_dataframe(self, column, func_de_decision, in_place=True, *args):
+    def filter_dataframe(self, column, decision_function, in_place=True, *args):
         if in_place is True:
             if len(args) == 2:
                 self.set_dataframe(
-                    self.get_dataframe().loc[self.get_column(column).apply(func_de_decision, args=(args[0], args[1]))])
+                    self.get_dataframe().loc[self.get_column(column).apply(decision_function, args=(args[0], args[1]))])
             else:
                 self.set_dataframe(
-                    self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)])
+                    self.get_dataframe().loc[self.get_column(column).apply(decision_function)])
         else:
             if len(args) == 2:
-                return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision, args=(args[0], args[1]))]
+                return self.get_dataframe().loc[self.get_column(column).apply(decision_function, args=(args[0], args[1]))]
             else:
-                return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)]
+                return self.get_dataframe().loc[self.get_column(column).apply(decision_function)]
 
-    def transform_column(self, column_to_transform, column_src, transformation_function, in_place=True, *args):
+    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, in_place=True, *args):
         """_summary_
 
         Args:
-            column_to_transform (_type_): column to transform
+            column_to_trsform (_type_): column to transform
             column_src (_type_): Column to use as a source for the transformation
-            transformation_function (_type_): The function of transformation, if it has multiple arguments pass them as args:
+            fun_de_trasformation (_type_): The function of transformation, if it has multiple arguments pass them as args:
             example: data.transform_column(column, column, Lib.remove_stopwords, True, stopwords)
             in_place (bool, optional): If true the changes will affect the original dataframe. Defaults to True.
 
@@ -745,14 +759,14 @@ class DataFrame:
         """
         if in_place is True:
             if (len(args) != 0):
-                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function, args=(args[0],)))
+                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
             else:
-                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function))
+                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
         else:
             if (len(args) != 0):
-                return self.get_column(column_src).apply(transformation_function, args=(args[0],))
+                return self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],))
             else:
-                return self.get_column(column_src).apply(transformation_function)
+                return self.get_column(column_src).apply(fun_de_trasformation)
             
     def to_no_accent_column(self, column):
         self.trasform_column(column, column, Lib.no_accent)
@@ -783,6 +797,7 @@ class DataFrame:
         column_name = 'count'
         self.set_column(column_name, self.get_column(column).value_counts())
         self.transform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
+        return self.get_dataframe()
     
     def get_count_number_of_all_words(self, column):
         self.apply_fun_to_column(column, lambda x: len(x.split(' ')))
@@ -945,12 +960,12 @@ class DataFrame:
         test = self.get_column(column).iloc[seuil:]
         return train, test
         
-    def column_to_date(self, column, format='%Y-%m-%d %H:%M'):
+    def column_to_date(self, column, format='%Y-%m-%d %H:%M:%S'):
         self.set_column(column, pd.to_datetime(self.get_column(column)))
         self.set_column(column, self.get_column(column).dt.strftime(format))
         self.set_column(column, pd.to_datetime(self.get_column(column)))
         
-    def date_time_formate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M'):
+    def date_time_formate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M:%S'):
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
         return self.get_dataframe()
         
@@ -963,15 +978,28 @@ class DataFrame:
                 self.set_dataframe(self.__dataframe.resample(frequency).sum())
             if agg == 'mean':
                 self.set_dataframe(self.__dataframe.resample(frequency).mean())
+            if agg == 'max':
+                self.set_dataframe(self.__dataframe.resample(frequency).max())
+            if agg == 'min':
+                self.set_dataframe(self.__dataframe.resample(frequency).min())
+            if agg == 'median':
+                self.set_dataframe(self.__dataframe.resample(frequency).median())
+            if agg == 'std':
+                self.set_dataframe(self.__dataframe.resample(frequency).std())
+            if agg == 'var':
+                self.set_dataframe(self.__dataframe.resample(frequency).var())
             if agg == 'ffill':
                 self.set_dataframe(self.__dataframe.resample(frequency).ffill())
             if agg == 'bfill':
                 self.set_dataframe(self.__dataframe.resample(frequency).bfill())
+            else:
+                self.set_dataframe(self.__dataframe.resample(frequency).mean())
         if reset_index is True:
             self.reset_index()
         return self.get_dataframe()
         
     def to_time_series(self, date_column, value_column, date_format='%Y-%m-%d', window_size=2, one_row=False):
+        from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator as SG
         # when working with train test generators
         """def to_time_series_generators(self, date_column, time_series_column, date_format='%Y-%m-%d', window_size=2, train_percent=0.8):
         self.column_to_date(date_column, format=date_format)
@@ -1102,7 +1130,6 @@ class DataFrame:
                 self.transform_column(name, name, log_function, min_column)
         self.convert_dataframe_type()
         return self.get_dataframe()
-    
     def load_dataset(self, dataset='iris'):
         """
         boston: Load and return the boston house-prices dataset (regression)
@@ -1128,8 +1155,11 @@ class DataFrame:
         if similarity_method == 'cosine':
             corpus = self.get_column_as_list(column_name1) + self.get_column_as_list(column_name2)
             vectorizer = Vectorizer(corpus, weighting_method)
+            print(len(self.get_column_as_list(column_name1)))
+            print(len(self.get_column_as_list(column_name2)))
             new_column = []
             for p in zip(self.get_column_as_list(column_name1), self.get_column_as_list(column_name2)):
+                print(p)
                 new_column.append(vectorizer.cosine_similarity(p[0], p[1])) 
             
             self.add_column(new_column, 'Similarity score')
