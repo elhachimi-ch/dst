@@ -2,6 +2,7 @@
 .readthedocs.yaml
 LICENSE
 README.md
+dst_test.ipynb
 pyproject.toml
 requirements.txt
 setup.py
