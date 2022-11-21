@@ -22,7 +22,6 @@ import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 
 
-
 class DataFrame:
     """
     """
@@ -30,16 +29,10 @@ class DataFrame:
     __generator = None
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
+                 data_type='csv', line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
         if data_link is not None:
             if data_type == 'csv':
-                if has_header is True:
-                    self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
-                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False)
-                else:
-                    self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
-                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False,
-                                               header=None)
+                self.__dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, low_memory=False, error_bad_lines=False, skip_blank_lines=False)
             elif data_type == 'json':
                 self.__dataframe = pd.read_json(data_link, encoding='utf-8')
             elif data_type == 'xls':
@@ -88,54 +81,6 @@ class DataFrame:
         
     def get_generator(self):
         return self.__generator
-    
-    def remove_stopwords(self, column, language_or_stopwords_list='english', in_place=True):
-        if isinstance(language_or_stopwords_list, list) is True:
-            stopwords = language_or_stopwords_list
-        elif language_or_stopwords_list == 'arabic':
-            stopwords = Lib.read_text_file_as_list('data/arabic_stopwords.csv')
-        else:
-            nltk.download('stopwords')
-            stopwords = nltk.corpus.stopwords.words(language_or_stopwords_list)
-        self.transform_column(column, column, DataFrame.remove_stopwords_lambda, in_place, stopwords)
-        return self.__dataframe
-    
-    @staticmethod
-    def remove_stopwords_lambda(document, stopwords_list):
-        document = str.lower(document)
-        stopwords = stopwords_list
-        words = word_tokenize(document)
-        clean_words = []
-        for w in words:
-            if w not in stopwords:
-                clean_words.append(w)
-        return ' '.join(clean_words)
-    
-    def add_random_series_column(self, column_name='random',min=0, max=100, distrubution_type='random', mean=0, sd=1):
-        if distrubution_type == 'random':
-            series = pd.Series(np.random.randint(min, max, self.get_shape()[0]))
-        elif distrubution_type == 'standard_normal':
-            series = pd.Series(np.random.standard_normal(self.get_shape()[0]))
-        elif distrubution_type == 'normal':
-            series = pd.Series(np.random.normal(mean, sd, self.get_shape()[0]))
-        else:
-            series = pd.Series(np.random.randn(self.get_shape()[0]))
-        self.add_column(series, column_name)
-        return self.__dataframe
-    
-    def drop_full_nan_columns(self):
-        for c in self.__dataframe.columns:
-                miss = self.__dataframe[c].isnull().sum()
-                missing_data_percent = round((miss/self.get_shape()[0])*100, 2)
-                if missing_data_percent == 100:
-                    self.drop_column(c)
-                    
-    def drop_columns_with_nan_threshold(self, threshold=0.5):
-        for c in self.__dataframe.columns:
-                miss = self.__dataframe[c].isnull().sum()
-                missing_data_percent = round((miss/self.get_shape()[0])*100, 2)
-                if missing_data_percent >= threshold*100:
-                    self.drop_column(c)
     
     def get_index(self, as_list=True):
         if as_list is True:
@@ -246,7 +191,7 @@ class DataFrame:
         self.__dataframe[column] = self.__dataframe[column].astype(column_type)
 
     def get_lines_columns(self, lines, columns):
-        if Lib.check_all_elements_type(columns, str):
+        if check_all_elements_type(columns, str):
             return self.get_dataframe().loc[lines, columns]
         return self.get_dataframe().iloc[lines, columns]
     
@@ -273,27 +218,19 @@ class DataFrame:
                 types[p] = str
             self.__dataframe = self.get_dataframe().astype(types)
         else:
-            self.get_dataframe().rename(columns=column_dict_or_all_list, inplace=True) 
+            self.get_dataframe().rename(columns=column_dict_or_all_list, inplace=True)
 
     def add_column(self, column, column_name):
         y = column
         if (not isinstance(column, pd.core.series.Series or not isinstance(column, pd.core.frame.DataFrame))):
             y = np.array(column)
             y = np.reshape(y, (y.shape[0],))
-            if len(self.get_index()) == 0:
-                y = pd.Series(y)
-            else:
-                y = pd.Series(y, self.get_index())
+            y = pd.Series(y, self.get_index())
         self.__dataframe[column_name] = y
         
     def add_transformed_columns(self, dest_column_name="new_column", transformation_rule="okk*2"):
         columns_names = self.get_columns_names()
         columns_dict = {}
-        operations = {'sqrt': sqrt, 
-         'pow': power,
-         'exp': exp,
-         }
-        columns_dict.update(operations)
         for column_name in columns_names:
             if column_name in transformation_rule:
                 columns_dict.update({column_name: self.get_column(column_name)})
@@ -342,17 +279,15 @@ class DataFrame:
         self.__dataframe = self.__dataframe.drop(column_name, axis=1)
         return self.__dataframe
         
-    def index_to_column(self):
-        self.__dataframe.reset_index(drop=False, inplace=True) 
+    def drop_index(self, drop=False):
+        if drop is True:
+            self.__dataframe.reset_index(drop=True, inplace=True) 
+        else:
+            self.__dataframe.reset_index(drop=False, inplace=True) 
         
     def drop_columns(self, columns_names_as_list):
         for p in columns_names_as_list:
             self.__dataframe = self.__dataframe.drop(p, axis=1)
-        return self.__dataframe
-    
-    def reorder_columns(self, new_order_as_list):
-        self.__dataframe.reindex_axis(new_order_as_list, axis=1)
-        return self.__dataframe
             
     def keep_columns(self, columns_names_as_list):
         for p in self.get_columns_names():
@@ -360,24 +295,16 @@ class DataFrame:
                 self.__dataframe = self.__dataframe.drop(p, axis=1)
         return self.__dataframe
 
-    def add_row(self, row_as_dict, index=None):
-        if index is not None:
-            row = pd.DataFrame(row_as_dict, index=[index])
-            self.__dataframe = pd.concat([self.__dataframe.iloc[:index], row, self.__dataframe.iloc[index:]]).reset_index(drop=True)
-            #self.reset_index()
-        else:
-            self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
+    def add_row(self, row_as_dict):
+        self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
 
     def pivot(self, index_columns_as_list, column_columns_as_list, column_of_values, agg_func):
         return self.get_dataframe().pivot_table(index=index_columns_as_list, columns=column_columns_as_list, values=column_of_values, aggfunc=agg_func)
 
-    def group_by(self, column_name):
-        self.set_dataframe(self.get_dataframe().groupby(column_name).count())
+    def group_by(self, column):
+        self.set_dataframe(self.get_dataframe().groupby(column).count())
         
-    def get_nan_indexes_of_column(self, column_name):
-        return list(self.get_dataframe().loc[pd.isna(self.get_column(column_name)), :].index)
-        
-    def missing_data_checking(self, column=None):
+    def check_missed_data(self, column=None):
         if column is not None:
             if any(pd.isna(self.get_dataframe()[column])) is True:
                 print("Missed data found in column " + column)
@@ -391,185 +318,19 @@ class DataFrame:
                     print("{} has {} missing value(s) which represents {}% of dataset size".format(c,miss, missing_data_percent))
                 else:
                     print("{} has NO missing value!".format(c))
-    
-    def missing_data_column_percent(self, column_name):
-        return self.__dataframe[column_name].isnull().sum()/self.get_shape()[0]
-    
-    def get_missing_data_indexes_in_column(self, column_name):
-        return self.__dataframe[self.__dataframe[column_name].isnull()].index.tolist()
 
-    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None, method='ffill',
-                     column_to_fill='Ta', date_column_name=None):
-        if filling_dict_colmn_val is None and drop_row_if_nan_in_column is None:
-            if method == 'ffill':
-                self.get_dataframe().fillna(method='pad', inplace=True)
-            elif method == 'bfill':
-                self.get_dataframe().fillna(method='backfill', inplace=True)
-            elif method == 'era5_land':
-                if column_to_fill == 'Ta':
-                    era5_land_variables = ['2m_temperature']
-                elif column_to_fill == 'Hr':
-                    era5_land_variables = ['2m_temperature', '2m_dewpoint_temperature']
-                elif column_to_fill == 'Rg':
-                    era5_land_variables = ['surface_solar_radiation_downwards']
-                
-                from gis import GIS
-                import cdsapi
-                c = cdsapi.Client()
-
-                if date_column_name is not None:
-                   self.reindex_dataframe(date_column_name)
-
-                indexes = []
-                for p in self.get_missing_data_indexes_in_column(column_to_fill):
-                    if isinstance(p, str) is True:
-                        indexes.append(datetime.datetime.strptime(p, '%Y-%m-%d %H:%M:%S'))
-                    else:
-                        indexes.append(p)
-                    
-                    
-                years = set()
-                for p in indexes:
-                    years.add(p.year)     
-                    
-                years = list(years)
-                print("Found missing data for {} in year(s): {}".format(column_to_fill, years))  
-                for y in years:
-                    missing_data_dict = {}
-                    missing_data_dict['month'] = set()   
-                    missing_data_dict['day'] = set() 
-                    for p in indexes:
-                        if p.year == y:
-                            missing_data_dict['month'].add(p.strftime('%m'))
-                            missing_data_dict['day'].add(p.strftime('%d'))
-                    missing_data_dict['month'] = list(missing_data_dict['month'])
-                    missing_data_dict['day'] = list(missing_data_dict['day'])
-
-                    if os.path.exists("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib") is False:
-                        c.retrieve(
-                            'reanalysis-era5-land',
-                            {
-                                'format': 'grib',
-                                'variable': era5_land_variables,
-                                'year': str(y),
-                                'month':  missing_data_dict['month'],
-                                'day': missing_data_dict['day'],
-                                'time': [
-                                    '00:00', '01:00', '02:00',
-                                    '03:00', '04:00', '05:00',
-                                    '06:00', '07:00', '08:00',
-                                    '09:00', '10:00', '11:00',
-                                    '12:00', '13:00', '14:00',
-                                    '15:00', '16:00', '17:00',
-                                    '18:00', '19:00', '20:00',
-                                    '21:00', '22:00', '23:00',
-                                ],
-                                'area': [
-                                    31.79, -7.59, 31.6,
-                                    -7.5,
-                                ],
-                            },
-                            'era5_r3_' + column_to_fill + '_' + str(y) +'.grib')
-                
-                gis = GIS()
-
-                data = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(years[0]) + ".grib", "ta"),
-                                data_type="df")
-                data.reset_index()
-                data.resample_timeseries(skip_rows=2)
-                data.reindex_dataframe("valid_time")
-                if column_to_fill == 'Ta':
-                    data.keep_columns(['t2m'])
-                    for y in years[1:]:
-                        data_temp = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib", "ta"),
-                                            data_type='df')
-                        data_temp.reset_index()
-                        data_temp.resample_timeseries(skip_rows=2)
-                        data_temp.reindex_dataframe("valid_time")
-                        data_temp.keep_columns(['t2m'])
-                        data.append_dataframe(data_temp.get_dataframe())
-                    
-                    data.transform_column('t2m', 't2m', lambda o: o - 273.15)
-                    nan_indices = self.get_nan_indexes_of_column(column_to_fill)
-                    for p in nan_indices:
-                        self.set_row('Ta', p, data.get_row(p)['t2m'])
-                    print('Imputation of missing data for Ta from ERA5-Land was done!')
-                    
-                elif column_to_fill == 'Hr':
-                    data.keep_columns(['t2m', 'd2m'])
-                    for y in years[1:]:
-                        data_temp = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib", "ta"),
-                                            data_type='df')
-                        data_temp.reset_index()
-                        data_temp.resample_timeseries(skip_rows=2)
-                        data_temp.reindex_dataframe("valid_time")
-                        data_temp.keep_columns(['t2m', 'd2m'])
-                        data.append_dataframe(data_temp.get_dataframe())
-                    data.transform_column('t2m', 't2m', lambda o: o - 273.15)
-                    data.transform_column('d2m', 'd2m', lambda o: o - 273.15)
-                    data.add_transformed_columns('era5_hr', '100*exp(-((243.12*17.62*t2m)-(d2m*17.62*t2m)-d2m*17.62*(243.12+t2m))/((243.12+t2m)*(243.12+d2m)))')
-                    nan_indices = self.get_missing_data_indexes_in_column(column_to_fill)
-                    for p in nan_indices:
-                        self.set_row('Hr', p, data.get_row(p)['era5_hr'])
-                    
-                    print('Imputation of missing data for Hr from ERA5-Land was done!')
-                elif column_to_fill == 'Rg':
-                    data.keep_columns(['ssrd'])
-                    for y in years[1:]:
-                        data_temp = DataFrame(gis.get_era5_land_grib_as_dataframe("E:\projects\pythonsnippets\era5_r3_" + column_to_fill + '_' + str(y) + ".grib", "ta"),
-                                            data_type='df')
-                        data_temp.reset_index()
-                        data_temp.resample_timeseries(skip_rows=2)
-                        data_temp.reindex_dataframe("valid_time")
-                        data_temp.keep_columns(['ssrd'])
-                        data.append_dataframe(data_temp.get_dataframe())
-                    
-                    
-                    l = []
-                    for p in data.get_index():
-                        if p.hour == 1:
-                            new_value = data.get_row(p)['ssrd']/3600
-                        else:
-                            try:
-                                previous_hour = data.get_row(p-timedelta(hours=1))['ssrd']
-                            except KeyError: # if age is not convertable to int
-                                previous_hour = data.get_row(p)['ssrd']
-                                
-                            new_value = (data.get_row(p)['ssrd'] - previous_hour)/3600
-                        l.append(new_value)
-
-                    data.add_column(l, 'rg')
-                    data.keep_columns(['rg'])
-                    data.rename_columns({'rg': 'ssrd'})
-                    data.transform_column('ssrd', 'ssrd', lambda o : o if abs(o) < 1500 else 0 )    
-                    data.export('rg.csv', index=True)
-                    nan_indices = self.get_nan_indexes_of_column(column_to_fill)
-                    for p in nan_indices:
-                        self.set_row('Rg', p, data.get_row(p)['ssrd'])
-                    
-                    print('Imputation of missing data for Rg from ERA5-Land was done!')
-        
-        if filling_dict_colmn_val is not None:
-            self.get_dataframe().fillna(filling_dict_colmn_val, inplace=True)
-            
+    def missing_data(self, filling_dict_colmn_val=None, drop_row_if_nan_in_column=None):
         if drop_row_if_nan_in_column is not None:
-            if drop_row_if_nan_in_column == 'all':
-                for p in self.get_columns_names():
-                    self.set_dataframe(self.__dataframe[self.__dataframe[p].notna()])
-            else:
-                # a = a[~(np.isnan(a).all(axis=1))] # removes rows containing all nan
-                self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
-                #self.__dataframe = self.__dataframe[~(np.isnan(self.__dataframe).any(axis=1))] # removes rows containing at least one nan
-          
+            # a = a[~(np.isnan(a).all(axis=1))] # removes rows containing all nan
+            self.set_dataframe(self.__dataframe[self.__dataframe[drop_row_if_nan_in_column].notna()])
+            #self.__dataframe = self.__dataframe[~(np.isnan(self.__dataframe).any(axis=1))] # removes rows containing at least one nan
+        else:
+            self.get_dataframe().fillna(filling_dict_colmn_val, inplace=True)
+        
     def get_row(self, row_index):
         if isinstance(row_index, int):
             return self.get_dataframe().iloc[row_index]
         return self.get_dataframe().loc[row_index]
-    
-    def set_row(self, column_name, row_index, new_value):
-        if isinstance(row_index, int):
-            self.__dataframe[column_name].iloc[row_index] = new_value
-        self.__dataframe[column_name].loc[row_index] = new_value
     
     def replace_column(self, column, pattern, replacement, regex=False, number_of_time=-1, case_sensetivity=False):
         self.set_column(column, self.get_column(column).str.replace(pattern, replacement, regex=regex, n=number_of_time,
@@ -616,11 +377,8 @@ class DataFrame:
         # append dataset contents data_sets must have the same columns names
         self.__dataframe = self.__dataframe.append(dataframe)
 
-    def join(self, dataframe, on_column='index'):
-        if on_column == 'index':
-           self.__dataframe = pd.merge(self.get_dataframe(), dataframe, left_index=True, right_index=True)
-        else:
-            self.__dataframe = pd.merge(self.__dataframe, dataframe, on=on_column, how='inner')
+    def intersection(self, dataframe, column):
+        self.__dataframe = pd.merge(self.__dataframe, dataframe, on=column, how='inner')
 
     def left_join(self, dataframe, column):
         self.__dataframe = pd.merge(self.__dataframe, dataframe, on=column, how='left')
@@ -701,7 +459,7 @@ class DataFrame:
         return self.__vectorizer.transform(np.reshape(self.get_column(column).iloc[-window_size:].to_numpy(), (window_size, 1)))
 
     def write_column_in_file(self, column, path='data/out.csv'):
-        Lib.write_liste_in_file(path, self.get_column(column).apply(str))
+        write_liste_in_file(path, self.get_column(column).apply(str))
 
     def check_duplicated_rows(self):
         return any(self.get_dataframe().duplicated())
@@ -710,11 +468,11 @@ class DataFrame:
         return any(self.get_column(column).duplicated())
 
     def write_check_duplicated_column_result_in_file(self, column, path='data/latin_comments.csv'):
-        Lib.write_liste_in_file(path, self.get_column(column).duplicated().apply(str))
+        write_liste_in_file(path, self.get_column(column).duplicated().apply(str))
 
     def write_files_grouped_by_column(self, column_index, dossier):
         for p in self.get_dataframe().values:
-            Lib.write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
+            write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
 
     def filter_dataframe(self, column, func_de_decision, in_place=True, *args):
         if in_place is True:
@@ -730,36 +488,18 @@ class DataFrame:
             else:
                 return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)]
 
-    def transform_column(self, column_to_transform, column_src, transformation_function, in_place=True, *args):
-        """_summary_
-
-        Args:
-            column_to_transform (_type_): column to transform
-            column_src (_type_): Column to use as a source for the transformation
-            transformation_function (_type_): The function of transformation, if it has multiple arguments pass them as args:
-            example: data.transform_column(column, column, Lib.remove_stopwords, True, stopwords)
-            in_place (bool, optional): If true the changes will affect the original dataframe. Defaults to True.
-
-        Returns:
-            _type_: _description_
-        """
-        if in_place is True:
-            if (len(args) != 0):
-                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function, args=(args[0],)))
-            else:
-                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function))
+    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, *args):
+        if (len(args) != 0):
+            self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
         else:
-            if (len(args) != 0):
-                return self.get_column(column_src).apply(transformation_function, args=(args[0],))
-            else:
-                return self.get_column(column_src).apply(transformation_function)
+            self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
             
     def to_no_accent_column(self, column):
-        self.trasform_column(column, column, Lib.no_accent)
+        self.trasform_column(column, column, no_accent)
         self.set_column(column, self.get_column(column))
 
     def write_dataframe_in_file(self, out_file='data/out.csv', delimiter=','):
-        Lib.write_liste_csv(self.get_dataframe().values, out_file, delimiter)
+        write_liste_csv(self.get_dataframe().values, out_file, delimiter)
 
     def sort(self, by_columns_list, ascending=False):
         self.set_dataframe(self.get_dataframe().sort_values(by=by_columns_list, ascending=ascending,
@@ -782,7 +522,7 @@ class DataFrame:
     def count_occurence_of_row_as_count_column(self, column):
         column_name = 'count'
         self.set_column(column_name, self.get_column(column).value_counts())
-        self.transform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
+        self.trasform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
     
     def get_count_number_of_all_words(self, column):
         self.apply_fun_to_column(column, lambda x: len(x.split(' ')))
@@ -799,12 +539,6 @@ class DataFrame:
 
     def count_true_decision_function_rows(self, column, decision_function):
         self.filter_dataframe(column, decision_function)
-        
-    def split_export(self, percentage=0.8, train_out_file="train.csv", test_out_file="test.csv"):
-        train = self.__dataframe.iloc[:int(percentage*self.get_shape()[0]), :]
-        test = self.__dataframe.iloc[int(percentage*self.get_shape()[0]):, :]
-        train.to_csv(train_out_file, index=False)
-        test.to_csv(test_out_file, index=False) 
         
     def show_wordcloud(self, column):
         wordcloud = WordCloud(
@@ -834,18 +568,12 @@ class DataFrame:
         header = list(self.get_dataframe().columns)
         return header 
     
-    def export_column(self, column_name, out_file='out.csv'):
-        self.get_column(column_name).to_csv(out_file, index=False)
-    
-    def export(self, destination_path='data/json_dataframe.csv', type='csv', index=False):
+    def export(self, destination_path='data/json_dataframe.csv', type='csv'):
         if type == 'json':
             destination_path='data/json_dataframe.json'
             self.get_dataframe().to_json(destination_path)
-        elif type == 'csv':
-            self.get_dataframe().to_csv(destination_path, index=index)
-        elif type == 'pkl':
-            self.get_dataframe().to_pickle(destination_path)
-        print('DataFrame exported successfully to /' + destination_path)
+            return 0
+        self.get_dataframe().to_csv(destination_path)
         
     def sample(self, n=10, frac=None):
         if frac is not None:
@@ -885,7 +613,7 @@ class DataFrame:
 
     def show(self, number_of_row=None):
         if number_of_row is None:
-            return self.get_dataframe()
+            print(self.get_dataframe())
         elif number_of_row < 0:
             return self.get_dataframe().tail(abs(number_of_row)) 
         else:
@@ -950,25 +678,11 @@ class DataFrame:
         self.set_column(column, self.get_column(column).dt.strftime(format))
         self.set_column(column, pd.to_datetime(self.get_column(column)))
         
-    def date_time_formate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M'):
-        self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
-        return self.get_dataframe()
-        
-    def resample_timeseries(self, date_column_name='date_time', frequency='d', agg='mean', skip_rows=None, intitial_index=0, reset_index=False):
-        if skip_rows is not None:
-            self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
-        else:
-            self.reindex_dataframe(date_column_name)
-            if agg == 'sum':
-                self.set_dataframe(self.__dataframe.resample(frequency).sum())
-            if agg == 'mean':
-                self.set_dataframe(self.__dataframe.resample(frequency).mean())
-            if agg == 'ffill':
-                self.set_dataframe(self.__dataframe.resample(frequency).ffill())
-            if agg == 'bfill':
-                self.set_dataframe(self.__dataframe.resample(frequency).bfill())
-        if reset_index is True:
-            self.reset_index()
+    def resample_timeseries(self, frequency='d', agg='mean'):
+        if agg == 'sum':
+            self.set_dataframe(self.__dataframe.resample(frequency).sum())
+        if agg == 'mean':
+            self.set_dataframe(self.__dataframe.resample(frequency).mean())
         return self.get_dataframe()
         
     def to_time_series(self, date_column, value_column, date_format='%Y-%m-%d', window_size=2, one_row=False):
@@ -1034,6 +748,18 @@ class DataFrame:
         """
         self.set_dataframe(self.get_dataframe().drop(indexes_as_list))
         
+    def save(self, path=None):
+        """Save a dataframe in pkl format for future use
+
+        Args:
+            path ([type], optional): link and name of storage file. If set to None, it will be dataframe.pkl.
+        """
+        if path is None:
+            self.get_dataframe().to_pickle("dataframe.pkl")
+        else:
+            self.get_dataframe().to_pickle(path)
+            
+        
     def dataframe_skip_columns(self, intitial_index, final_index, step=2):
         self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:step])
         
@@ -1091,18 +817,19 @@ class DataFrame:
                                        line_index=self.get_index(),
                                        columns_names_as_list=column_names, 
                                        data_type='matrix').get_dataframe())
+            return self.get_dataframe()
         elif scaler_type == 'standard':
             self.__vectorizer = StandardScaler() 
             self.set_dataframe(self.__vectorizer.fit_transform(X=self.get_dataframe()))
+            return self.get_dataframe()
         elif scaler_type == 'adjusted_log':
             def log_function(o, min_column):
                 return np.log(1 + o - min_column)
             for name in self.get_columns_names():
                 min_column = self.get_column(name).min()
                 self.transform_column(name, name, log_function, min_column)
-        self.convert_dataframe_type()
-        return self.get_dataframe()
-    
+            return self.get_dataframe()
+        
     def load_dataset(self, dataset='iris'):
         """
         boston: Load and return the boston house-prices dataset (regression)
@@ -1122,19 +849,7 @@ class DataFrame:
             x = data.data
             y = data.target
             self.set_dataframe(x)
-            self.add_column(y,'target')  
-            
-    def similarity_measure_as_column(self, column_name1, column_name2, similarity_method='cosine', weighting_method='tfidf'):
-        if similarity_method == 'cosine':
-            corpus = self.get_column_as_list(column_name1) + self.get_column_as_list(column_name2)
-            vectorizer = Vectorizer(corpus, weighting_method)
-            new_column = []
-            for p in zip(self.get_column_as_list(column_name1), self.get_column_as_list(column_name2)):
-                new_column.append(vectorizer.cosine_similarity(p[0], p[1])) 
-            
-            self.add_column(new_column, 'Similarity score')
-        
-        return self.get_dataframe()
+            self.add_column(y,'target')            
         
     @staticmethod
     def outliers_decision_function(o, min_quantile, max_quantile):
