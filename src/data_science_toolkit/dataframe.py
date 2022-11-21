@@ -777,7 +777,7 @@ class DataFrame:
     def count_occurence_of_row_as_count_column(self, column):
         column_name = 'count'
         self.set_column(column_name, self.get_column(column).value_counts())
-        self.trasform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
+        self.transform_column(column_name, column, lambda x:self.get_column(column).value_counts().get(x))
     
     def get_count_number_of_all_words(self, column):
         self.apply_fun_to_column(column, lambda x: len(x.split(' ')))
