@@ -1,10 +1,6 @@
 Metadata-Version: 2.1
 Name: data-science-toolkit
-<<<<<<< HEAD
-Version: 0.0.988
-=======
 Version: 0.0.993
->>>>>>> 0a9024c95de3591a976967d81b9bba573e7a0139
 Summary: Data Science Toolkit (DST) is a Python library that helps implement data science related project with ease.
 Home-page: https://github.com/elhachimi-ch/dst
 Author: EL HACHIMI CHOUAIB

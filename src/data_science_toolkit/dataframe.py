@@ -360,8 +360,13 @@ class DataFrame:
                 self.__dataframe = self.__dataframe.drop(p, axis=1)
         return self.__dataframe
 
-    def add_row(self, row_as_dict):
-        self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
+    def add_row(self, row_as_dict, index=None):
+        if index is not None:
+            row = pd.DataFrame(row_as_dict, index=[index])
+            self.__dataframe = pd.concat([self.__dataframe.iloc[:index], row, self.__dataframe.iloc[index:]]).reset_index(drop=True)
+            #self.reset_index()
+        else:
+            self.__dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
 
     def pivot(self, index_columns_as_list, column_columns_as_list, column_of_values, agg_func):
         return self.get_dataframe().pivot_table(index=index_columns_as_list, columns=column_columns_as_list, values=column_of_values, aggfunc=agg_func)
@@ -725,13 +730,13 @@ class DataFrame:
             else:
                 return self.get_dataframe().loc[self.get_column(column).apply(func_de_decision)]
 
-    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, in_place=True, *args):
+    def transform_column(self, column_to_transform, column_src, transformation_function, in_place=True, *args):
         """_summary_
 
         Args:
-            column_to_trsform (_type_): column to transform
+            column_to_transform (_type_): column to transform
             column_src (_type_): Column to use as a source for the transformation
-            fun_de_trasformation (_type_): The function of transformation, if it has multiple arguments pass them as args:
+            transformation_function (_type_): The function of transformation, if it has multiple arguments pass them as args:
             example: data.transform_column(column, column, Lib.remove_stopwords, True, stopwords)
             in_place (bool, optional): If true the changes will affect the original dataframe. Defaults to True.
 
@@ -740,14 +745,14 @@ class DataFrame:
         """
         if in_place is True:
             if (len(args) != 0):
-                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
+                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function, args=(args[0],)))
             else:
-                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
+                self.set_column(column_to_transform, self.get_column(column_src).apply(transformation_function))
         else:
             if (len(args) != 0):
-                return self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],))
+                return self.get_column(column_src).apply(transformation_function, args=(args[0],))
             else:
-                return self.get_column(column_src).apply(fun_de_trasformation)
+                return self.get_column(column_src).apply(transformation_function)
             
     def to_no_accent_column(self, column):
         self.trasform_column(column, column, Lib.no_accent)
