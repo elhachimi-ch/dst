@@ -21,7 +21,6 @@ import numpy as np
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 
-
 class DataFrame:
     """
     """
@@ -29,9 +28,10 @@ class DataFrame:
     __generator = None
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1',
+                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name=0,
                  skip_rows=None
                  ):
+        
         if data_link is not None:
             if data_type == 'csv':
                 if has_header is True:
@@ -123,7 +123,7 @@ class DataFrame:
             series = pd.Series(np.random.normal(mean, sd, self.get_shape()[0]))
         else:
             series = pd.Series(np.random.randn(self.get_shape()[0]))
-        self.add_column(series, column_name)
+        self.add_column(column_name, series)
         return self.__dataframe
     
     def drop_full_nan_columns(self):
@@ -278,7 +278,7 @@ class DataFrame:
         else:
             self.get_dataframe().rename(columns=column_dict_or_all_list, inplace=True) 
 
-    def add_column(self, column, column_name):
+    def add_column(self, column_name, column):
         y = column
         if (not isinstance(column, pd.core.series.Series or not isinstance(column, pd.core.frame.DataFrame))):
             y = np.array(column)
@@ -332,7 +332,7 @@ class DataFrame:
                                       time_column_name='time', 
                                       new_date_time_column_name='date_time',
                                       date_time_format='%Y-%m-%d %H:%M:%S'):
-        self.add_column(self.get_column(date_column_name).astype(str) + ' ' + self.get_column(time_column_name).astype(str), new_date_time_column_name)
+        self.add_column(new_date_time_column_name, self.get_column(date_column_name).astype(str) + ' ' + self.get_column(time_column_name).astype(str))
         self.column_to_date(new_date_time_column_name, format=date_time_format)
         
     def to_lower_column(self, column):
@@ -353,8 +353,10 @@ class DataFrame:
         self.__dataframe = self.__dataframe.drop(column_name, axis=1)
         return self.__dataframe
         
-    def index_to_column(self):
+    def index_to_column(self, column_name=None):
         self.__dataframe.reset_index(drop=False, inplace=True) 
+        if column_name is not None:
+            self.rename_columns({'index': column_name})
         
     def drop_columns(self, columns_names_as_list):
         for p in columns_names_as_list:
@@ -388,20 +390,25 @@ class DataFrame:
     def get_nan_indexes_of_column(self, column_name):
         return list(self.get_dataframe().loc[pd.isna(self.get_column(column_name)), :].index)
         
-    def missing_data_checking(self, column=None):
-        if column is not None:
-            if any(pd.isna(self.get_dataframe()[column])) is True:
-                print("Missed data found in column " + column)
+    def missing_data_checking(self, column_name=None):
+        if column_name is not None:
+            if any(pd.isna(self.get_dataframe()[column_name])) is True:
+                miss = self.__dataframe[column_name].isnull().sum()
+                missing_data_percent = round((miss/self.get_shape()[0])*100, 2)
+                print("{} has {} missing value(s) which represents {}% of dataset size".format(column_name, miss, missing_data_percent))
             else:
-                print("No missed data in column " + column)
+                print("No missed data in column " + column_name)
         else:
+            miss = []
             for c in self.__dataframe.columns:
-                miss = self.__dataframe[c].isnull().sum()
-                if miss>0:
-                    missing_data_percent = round((miss/self.get_shape()[0])*100, 2)
-                    print("{} has {} missing value(s) which represents {}% of dataset size".format(c,miss, missing_data_percent))
+                miss_by_column = self.__dataframe[c].isnull().sum()
+                if miss_by_column>0:
+                    missing_data_percent = round((miss_by_column/self.get_shape()[0])*100, 2)
+                    print("{} has {} missing value(s) which represents {}% of dataset size".format(c, miss_by_column, missing_data_percent))
                 else:
                     print("{} has NO missing value!".format(c))
+                miss.append(miss_by_column)
+        return miss
     
     def missing_data_column_percent(self, column_name):
         return self.__dataframe[column_name].isnull().sum()/self.get_shape()[0]
@@ -476,8 +483,8 @@ class DataFrame:
                                     '21:00', '22:00', '23:00',
                                 ],
                                 'area': [
-                                    31.79, -7.59, 31.6,
-                                    -7.5,
+                                    31.66749781, -7.593311291, 31.66749781,
+                                    -7.593311291,
                                 ],
                             },
                             'era5_r3_' + column_to_fill + '_' + str(y) +'.grib')
@@ -549,7 +556,7 @@ class DataFrame:
                             new_value = (data.get_row(p)['ssrd'] - previous_hour)/3600
                         l.append(new_value)
 
-                    data.add_column(l, 'rg')
+                    data.add_column('rg', l)
                     data.keep_columns(['rg'])
                     data.rename_columns({'rg': 'ssrd'})
                     data.transform_column('ssrd', 'ssrd', lambda o : o if abs(o) < 1500 else 0 )    
@@ -595,11 +602,14 @@ class DataFrame:
     def map_function(self, func, **kwargs):
         self.__dataframe = self.get_dataframe().applymap(func, **kwargs)
 
-    def apply_fun_to_column(self, column, func, in_place=True):
+    def apply_fun_to_column(self, column, func, in_place=True,):
         if in_place is True:
             self.set_column(column, self.get_column(column).apply(func))
         else:
             return self.get_column(column).apply(func)
+        
+    def add_column_based_on_function(self, column_name, func_accepting_row):
+        self.add_column(column_name, self.get_dataframe().apply(func_accepting_row, axis=1))
         
     def convert_column_type(self, column_name, new_type='float64'):
         """Convert the type of the column
@@ -609,12 +619,10 @@ class DataFrame:
             Retruns (dataframe): New dataframe after conversion
         """
         self.set_column(column_name, self.get_column(column_name).astype(new_type))
-        return self.get_columns_types()
     
-    def convert_dataframe_type(self, new_type='float64'):
+    def convert_dataframe_type(self, new_type='float64', ):
         for p in self.get_columns_names():
             self.convert_column_type(p, new_type)
-        return self.get_columns_types()
 
     def concatinate(self, dataframe, ignore_index=False, join='outer'):
         """conacatenate horizontally two dataframe
@@ -815,6 +823,33 @@ class DataFrame:
     def count_true_decision_function_rows(self, column, decision_function):
         self.filter_dataframe(column, decision_function)
         
+    def plot_column(self, column_name, x_column_name='index', 
+                    x_label='Date & time',
+                    y_label=None,
+                    x_label_rotation=0,
+                    y_label_rotation=0,
+                    save_fig=False,
+                    savefig_path='out.png'
+                    ):
+        fig, ax = plt.subplots()
+        if x_column_name == 'index':
+            ax.plot(self.get_index(), self.get_column(column_name))
+        else:
+            ax.plot(self.get_column(x_column_name), self.get_column(column_name))
+        # set the axis labels and title
+        ax.set_xlabel(x_label)
+        if y_label is None:
+            y_label = column_name
+        ax.set_ylabel(y_label)
+        ax.tick_params(axis='x', rotation=x_label_rotation)
+        ax.tick_params(axis='y', rotation=y_label_rotation)
+        plt.tight_layout()
+        if save_fig is True:
+            import matplotlib as mpl
+            mpl.rcParams['agg.path.chunksize'] = 10000
+            fig.savefig(savefig_path, dpi=720)
+        plt.show()
+        
     def split_export(self, percentage=0.8, train_out_file="train.csv", test_out_file="test.csv"):
         train = self.__dataframe.iloc[:int(percentage*self.get_shape()[0]), :]
         test = self.__dataframe.iloc[int(percentage*self.get_shape()[0]):, :]
@@ -908,6 +943,14 @@ class DataFrame:
 
     def get_sliced_dataframe(self, line_tuple, columns_tuple):
         return self.get_dataframe().loc[line_tuple[0]:line_tuple[1], columns_tuple[0]: columns_tuple[1]]
+    
+    def compare_two_times(self, time_series1_column_name, time_series2_column_name):
+        from sklearn.metrics import r2_score, mean_squared_error 
+        import math
+        comparaison_dict = {}
+        comparaison_dict['RMSE'] = math.sqrt(mean_squared_error(self.get_column(time_series1_column_name), self.get_column(time_series2_column_name)))
+        comparaison_dict['R²'] = r2_score(self.get_column(time_series1_column_name), self.get_column(time_series2_column_name))
+        return comparaison_dict
 
     def eliminate_outliers_quantile(self, column, min_quantile, max_quantile):
         min_q, max_q = self.get_column(column).quantile(min_quantile), self.get_column(column).quantile(max_quantile)
@@ -920,9 +963,8 @@ class DataFrame:
     def drop_duplicated_rows(self, column):
         self.set_dataframe(self.__dataframe.drop_duplicates(subset=column, keep='first'))
         
-    def plot_column(self, column):
-        self.get_column(column).plot()
-        plt.show()
+    def drop_duplicated_indexes(self):
+        self.__dataframe = self.__dataframe[~self.__dataframe.index.duplicated(keep='first')]
         
     def plot_dataframe(self):
         self.get_dataframe().plot()
@@ -930,6 +972,19 @@ class DataFrame:
         
     def to_numpy(self):
         return self.get_dataframe().values
+    
+    def generate_datetime_range_dataframe(self, 
+                                          starting_datetime='2013-01-01 00:00:00', 
+                                          end_datetime='2013-12-31 00:00:00', 
+                                          periods=None, 
+                                          freq='1H'):
+        self.__dataframe = DataFrame().get_dataframe()
+        self.set_dataframe_index(self.generate_datetime_range(
+            starting_datetime='2013-01-01 00:00:00', 
+            end_datetime='2013-12-31 00:00:00', 
+            periods=None, 
+            freq='1H'))
+        return self.get_dataframe()
     
     def info(self):
         return self.get_dataframe().info()
@@ -959,6 +1014,164 @@ class DataFrame:
         train = self.get_column(column).iloc[:seuil]
         test = self.get_column(column).iloc[seuil:]
         return train, test
+    
+    @staticmethod
+    def get_elevation_and_latitude(lat, lon):
+        """
+        Returns the elevation (in meters) and latitude (in degrees) for a given set of coordinates.
+        Uses the Open Elevation API (https://open-elevation.com/) to obtain the elevation information.
+        """
+        # 'https://api.open-elevation.com/api/v1/lookup?locations=10,10|20,20|41.161758,-8.583933'
+        url = f'https://api.opentopodata.org/v1/aster30m?locations={lat},{lon}'
+        response = requests.get(url)
+        print(response.json())
+        data = response.json()
+        elevation = data['results'][0]['elevation']
+        #latitude = data['results'][0]['latitude']
+        return elevation
+    
+    @staticmethod
+    def et0_penman_monteith(row):
+        # input variables
+        # T = 25.0  # air temperature in degrees Celsius
+        # RH = 60.0  # relative humidity in percent
+        # u2 = 2.0  # wind speed at 2 m height in m/s
+        # Rs = 15.0  # incoming solar radiation in MJ/m2/day
+        # lat = 35.0  # latitude in degrees
+        
+        ta_max, ta_min, rh_max, rh_min, u2_mean, rs_mean, lat, elevation, doy =  row['ta_max'], row['ta_min'], row['rh_max'], row['rh_min'], row['u2_mean'], row['rg_mean'], row['lat'], row['elevation'], row['doy']
+        
+        # constants
+        ALBEDO = 0.23  # Albedo coefficient for grass reference surface
+        GSC = 0.082  # solar constant in MJ/m2/min
+        SIGMA = 0.000000004903  # Stefan-Boltzmann constant in MJ/K4/m2/day
+        G = 0  # Soil heat flux density (MJ/m2/day)
+        z = 2 # Convert wind speed measured at different heights above the soil surface to wind speed at 2 m above the surface, assuming a short grass surface.
+
+        # convert units
+        rs_mean *= 0.0864  # convert watts per square meter to megajoules per square meter 0.0288 = 60x60x8hours or 0.0864 for 24 hours
+        ta_mean = (ta_max + ta_min) / 2
+        ta_max_kelvin = ta_max + 273.16  # air temperature in Kelvin
+        ta_min_kelvin = ta_min + 273.16  # air temperature in Kelvin
+        
+        # saturation vapor pressure in kPa
+        es_max = 0.6108 * math.exp((17.27 * ta_max) / (ta_max + 237.3))
+        es_min = 0.6108 * math.exp((17.27 * ta_min) / (ta_min + 237.3))
+        es = (es_max + es_min) / 2
+        
+        # actual vapor pressure in kPa
+        ea_max_term = es_max * (rh_min / 100)
+        ea_min_term = es_min * (rh_max / 100)
+        ea = (ea_max_term + ea_min_term) / 2
+        
+        # in the absence of rh_max and rh_min
+        #ea = (rh_mean / 100) * es
+        
+        # when using equipement where errors in estimation rh min can be large or when rh data integrity are in doubt use only rh_max term
+        #ea = ea_min_term  
+        
+        delta = (4098 * (0.6108 * math.exp((17.27 * ta_mean) / (ta_mean + 237.3)))) / math.pow((ta_mean + 237.3), 2) # slope of the vapor pressure curve in kPa/K
+        
+        
+        atm_pressure = math.pow(((293.0 - (0.0065 * elevation)) / 293.0), 5.26) * 101.3
+        # psychrometric constant in kPa/K
+        gamma = 0.000665 * atm_pressure
+        
+        # Calculate u2
+        u2 = u2_mean * (4.87 / math.log((67.8 * z) - 5.42))
+        
+        # Calculate extraterrestrial radiation
+        dr = 1 + 0.033 * math.cos(2 * math.pi / 365 * doy)
+        d = 0.409*math.sin( (((2*math.pi) / 365) * doy) - 1.39)
+        
+        
+        # sunset hour angle
+        phi = math.radians(lat)
+        omega = math.acos(-math.tan(phi)*math.tan(d))
+        ra = ((24 * 60)/math.pi) * GSC * dr * ((omega * math.sin(phi) * math.sin(d)) + (math.cos(phi) * math.cos(d) * math.sin(omega)))
+        
+        # Calculate clear sky solar radiation
+        rso = (0.75 + (2e-5 * elevation)) * ra
+        
+        # Calculate net solar shortwave radiation 
+        rns = (1 - ALBEDO) * rs_mean
+        
+        # Calculate net longwave radiation
+        rnl = SIGMA * (((math.pow(ta_max_kelvin, 4) + math.pow(ta_min_kelvin, 4)) / 2) * (0.34 - (0.14 * math.sqrt(ea))) * ((1.35 * (rs_mean / rso)) - 0.35))
+        
+        # Calculate net radiation
+        rn = rns - rnl
+        
+        
+        # decompose et0 to two terms to facilitate the calculation
+        """rng = 0.408 * rn
+        radiation_term = ((delta) / (delta + (gamma * (1 + 0.34 * u2)))) * rng
+        pt = (gamma) / (delta + gamma * (1 + (0.34 * u2)))
+        tt = ((900) / (ta_mean + 273) ) * u2
+        wind_term = pt * tt * (es - ea)
+        et0 = radiation_term + wind_term """
+        
+        et0 = ((0.408 * delta * (rn - G)) + gamma * ((900 / (ta_mean + 273)) * u2 * (es - ea))) / (delta + (gamma * (1 + 0.34 * u2)))
+
+        # output result
+        return et0
+
+    @staticmethod
+    def et0_hargreaves(row):
+        ta_mean, ta_max, ta_min, lat, doy =  row['ta_mean'], row['ta_max'], row['ta_min'], row['lat'], row['doy']
+        
+        # constants
+        GSC = 0.082  # solar constant in MJ/m2/min
+
+        # Calculate extraterrestrial radiation
+        dr = 1 + 0.033 * math.cos(2 * math.pi / 365 * doy)
+        d = 0.409*math.sin( (((2*math.pi) / 365) * doy) - 1.39)
+
+        # sunset hour angle
+        phi = math.radians(lat)
+        omega = math.acos(-math.tan(phi)*math.tan(d))
+        ra = ((24 * 60)/math.pi) * GSC * dr * ((omega * math.sin(phi) * math.sin(d)) + (math.cos(phi) * math.cos(d) * math.sin(omega)))
+        
+        et0 = 0.0023 * (ta_mean + 17.8) * (ta_max - ta_min) ** 0.5 * 0.408 * ra
+
+        return et0
+    
+    def et0_estimation(self, 
+                       air_temperture_column_name='ta',
+                       global_solar_radiation_column_name='rs',
+                       air_relative_humidity_column_name='rh',
+                       wind_speed_column_name='ws',
+                       date_time_column_name='date_time',
+                       latitude=31.65410805,
+                       longitude=-7.603140831,
+                       method='pm',
+                       in_place=True
+                       ):
+        
+        et0_data = DataFrame()
+        et0_data.add_column('ta_mean', self.resample_timeseries(in_place=False)[air_temperture_column_name])
+        et0_data.add_column('ta_max', self.resample_timeseries(in_place=False, agg='max')[air_temperture_column_name])
+        et0_data.add_column('ta_min', self.resample_timeseries(in_place=False, agg='min')[air_temperture_column_name], )
+        et0_data.add_column('rh_max', self.resample_timeseries(in_place=False, agg='max')[air_relative_humidity_column_name])
+        et0_data.add_column('rh_min', self.resample_timeseries(in_place=False, agg='min')[air_relative_humidity_column_name])
+        et0_data.add_column('rh_mean', self.resample_timeseries(in_place=False)[air_relative_humidity_column_name])
+        et0_data.add_column('u2_mean', self.resample_timeseries(in_place=False)[wind_speed_column_name])
+        et0_data.add_column('rg_mean', self.resample_timeseries(in_place=False)[global_solar_radiation_column_name])
+        et0_data.index_to_column()
+        et0_data.add_doy_column('date_time')
+        et0_data.add_one_value_column('elevation', DataFrame.get_elevation_and_latitude(latitude, longitude))
+        et0_data.add_one_value_column('lat', latitude)
+        
+        if method == 'pm':
+            et0_data.add_column_based_on_function('et0_pm', DataFrame.et0_penman_monteith)
+        elif method == 'hargreaves':
+            et0_data.add_column_based_on_function('et0_hargreaves', DataFrame.et0_hargreaves)
+            
+        if in_place == True:
+            self.__dataframe = et0_data.get_dataframe()
+            
+        return et0_data.get_dataframe()
+        
         
     def column_to_date(self, column, format='%Y-%m-%d %H:%M:%S'):
         self.set_column(column, pd.to_datetime(self.get_column(column)))
@@ -968,35 +1181,75 @@ class DataFrame:
     def date_time_formate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M:%S'):
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
         return self.get_dataframe()
-        
-    def resample_timeseries(self, date_column_name='date_time', frequency='d', agg='mean', skip_rows=None, intitial_index=0, reset_index=False):
-        if skip_rows is not None:
-            self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
-        else:
-            self.reindex_dataframe(date_column_name)
-            if agg == 'sum':
-                self.set_dataframe(self.__dataframe.resample(frequency).sum())
-            if agg == 'mean':
-                self.set_dataframe(self.__dataframe.resample(frequency).mean())
-            if agg == 'max':
-                self.set_dataframe(self.__dataframe.resample(frequency).max())
-            if agg == 'min':
-                self.set_dataframe(self.__dataframe.resample(frequency).min())
-            if agg == 'median':
-                self.set_dataframe(self.__dataframe.resample(frequency).median())
-            if agg == 'std':
-                self.set_dataframe(self.__dataframe.resample(frequency).std())
-            if agg == 'var':
-                self.set_dataframe(self.__dataframe.resample(frequency).var())
-            if agg == 'ffill':
-                self.set_dataframe(self.__dataframe.resample(frequency).ffill())
-            if agg == 'bfill':
-                self.set_dataframe(self.__dataframe.resample(frequency).bfill())
+
+    def resample_timeseries(self, 
+                            date_column_name='date_time',
+                            frequency='d', agg='mean', 
+                            skip_rows=None, 
+                            intitial_index=0, 
+                            reset_index=False,
+                            between_time_tuple=None,
+                            in_place=True):
+        if in_place is True:
+            if skip_rows is not None:
+                self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
             else:
-                self.set_dataframe(self.__dataframe.resample(frequency).mean())
-        if reset_index is True:
-            self.reset_index()
-        return self.get_dataframe()
+                self.reindex_dataframe(date_column_name)
+                if agg == 'sum':
+                    self.set_dataframe(self.__dataframe.resample(frequency).sum())
+                if agg == 'mean':
+                    self.set_dataframe(self.__dataframe.resample(frequency).mean())
+                if agg == 'max':
+                    self.set_dataframe(self.__dataframe.resample(frequency).max())
+                if agg == 'min':
+                    self.set_dataframe(self.__dataframe.resample(frequency).min())
+                if agg == 'median':
+                    self.set_dataframe(self.__dataframe.resample(frequency).median())
+                if agg == 'std':
+                    self.set_dataframe(self.__dataframe.resample(frequency).std())
+                if agg == 'var':
+                    self.set_dataframe(self.__dataframe.resample(frequency).var())
+                if agg == 'ffill':
+                    self.set_dataframe(self.__dataframe.resample(frequency).ffill())
+                if agg == 'bfill':
+                    self.set_dataframe(self.__dataframe.resample(frequency).bfill())
+                else:
+                    self.set_dataframe(self.__dataframe.resample(frequency).mean())
+            if reset_index is True:
+                self.reset_index()
+            return self.get_dataframe()
+        else:
+            if skip_rows is not None:
+                self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
+            else:
+                self.reindex_dataframe(date_column_name)
+                temp_time_series = self.__dataframe
+                if between_time_tuple is not None:
+                    temp_time_series = temp_time_series.between_time(between_time_tuple[0], between_time_tuple[1])
+
+                if agg == 'sum':
+                    resampled_dataframe = temp_time_series.resample(frequency).sum()
+                if agg == 'mean':
+                    resampled_dataframe = temp_time_series.resample(frequency).mean()
+                if agg == 'max':
+                    resampled_dataframe = temp_time_series.resample(frequency).max()
+                if agg == 'min':
+                    resampled_dataframe = temp_time_series.resample(frequency).min()
+                if agg == 'median':
+                    resampled_dataframe = temp_time_series.resample(frequency).median()
+                if agg == 'std':
+                    resampled_dataframe = temp_time_series.resample(frequency).std()
+                if agg == 'var':
+                    resampled_dataframe = temp_time_series.resample(frequency).var()
+                if agg == 'ffill':
+                    resampled_dataframe = temp_time_series.resample(frequency).ffill()
+                if agg == 'bfill':
+                    resampled_dataframe = temp_time_series.resample(frequency).bfill()
+                
+                self.index_to_column('date_time')
+            if reset_index is True:
+                self.reset_index()
+            return resampled_dataframe
         
     def to_time_series(self, date_column, value_column, date_format='%Y-%m-%d', window_size=2, one_row=False):
         from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator as SG
@@ -1067,6 +1320,9 @@ class DataFrame:
         
     def shuffle_dataframe(self):
         self.set_dataframe(self.get_dataframe().sample(frac=1).reset_index(drop=True))
+        
+    def add_doy_column(self, date_time_column_name='date_time'):
+        self.add_column('doy', self.get_column(date_time_column_name).dt.day_of_year)
         
     def scale_columns(self, columns_names_as_list, scaler_type='min_max', in_place=True):
         """A method  to standardize the independent features present in the concerned columns in a fixed range.
@@ -1142,14 +1398,14 @@ class DataFrame:
             features_names = data.feature_names
             self.set_dataframe(x, data_type='matrix')
             self.rename_columns(features_names, all_columns=True)
-            self.add_column(y,'house_price')
+            self.add_column('house_price', y)
             
         elif dataset == 'iris':
             data = load_iris(as_frame=True)
             x = data.data
             y = data.target
             self.set_dataframe(x)
-            self.add_column(y,'target')  
+            self.add_column('target', y)  
             
     def similarity_measure_as_column(self, column_name1, column_name2, similarity_method='cosine', weighting_method='tfidf'):
         if similarity_method == 'cosine':
@@ -1162,7 +1418,7 @@ class DataFrame:
                 print(p)
                 new_column.append(vectorizer.cosine_similarity(p[0], p[1])) 
             
-            self.add_column(new_column, 'Similarity score')
+            self.add_column('Similarity score', new_column)
         
         return self.get_dataframe()
         
@@ -1173,8 +1429,10 @@ class DataFrame:
         return False
     
     @staticmethod
-    def generate_datetime_range(starting_datetime='2013-01-01', periods=365, freq='1H'):
-        return pd.date_range(starting_datetime, periods=periods, freq=freq)
+    def generate_datetime_range(starting_datetime='2013-01-01 00:00:00', end_datetime='2013-12-31 00:00:00', periods=None, freq='1H'):
+        if periods is not None:
+            return pd.date_range(start=starting_datetime, periods=periods, freq=freq)
+        return pd.date_range(start=starting_datetime, end=end_datetime, freq=freq)
 
     @staticmethod
     def scale_trasform_fun(o, max_column):
