@@ -13,8 +13,9 @@ xgboost
 opencv-python
 scikit-image
 unidecode
-emoji
+emoji>=1.7
 textblob
 nltk
 wordcloud
 optuna
+contextily

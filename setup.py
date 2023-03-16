@@ -40,10 +40,11 @@ setuptools.setup(
         "opencv-python",
         "scikit-image",
         "unidecode",
-        "emoji=>1.7",
+        "emoji>=1.7",
         "textblob",
         "nltk",
         "wordcloud",
-        "optuna"
+        "optuna",
+        "contextily"
     ],
 )
