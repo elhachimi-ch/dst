@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 from sklearn.preprocessing import minmax_scale
 from sklearn.compose import ColumnTransformer
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator as SG
-from sklearn.datasets import load_iris, load_boston
+from sklearn.datasets import load_iris
 from collections import Counter
 from .chart import Chart
 import numpy as np
