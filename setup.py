@@ -6,7 +6,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
     
 setuptools.setup(
     name="data-science-toolkit",
-    version="0.0.993",
+    version="0.1.0",
     author="EL HACHIMI CHOUAIB",
     author_email="elhachimi.ch@gmail.com",
     description="Data Science Toolkit (DST) is a Python library that helps implement data science related project with ease.",
@@ -40,10 +40,12 @@ setuptools.setup(
         "opencv-python",
         "scikit-image",
         "unidecode",
-        "emoji",
+        "emoji>=1.7",
         "textblob",
         "nltk",
         "wordcloud",
-        "optuna"
+        "optuna",
+        "contextily",
+        "langdetect"
     ],
 )

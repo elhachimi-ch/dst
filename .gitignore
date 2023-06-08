@@ -8,3 +8,4 @@ __pycache__/
 *.vscode
 dist/
 local_kitchen.py
+data_science_toolkit.egg-info/

@@ -8,6 +8,7 @@ from sklearn.preprocessing import MinMaxScaler
 import nltk
 from sklearn.metrics.pairwise import cosine_similarity
 
+
 class Vectorizer:
     __vectorizer = None
     __matrice = None
@@ -83,16 +84,18 @@ class Vectorizer:
         e = e.lower()
         return {
             'f1': e[0],  # First letter
-            'f2': e[0:2],  # First 2 letters
+            #'f2': e[0:2],  # First 2 letters
             'f3': e[0:3],  # First 3 letters
             'l1': e[-1],
-            'l2': e[-2:],
+            #'l2': e[-2:],
             'l3': e[-3:],
+            'len': len(e),
+            'not': len(Lib.get_all_words(e)),
         }
 
     def get_docs_projections_as_sparse(self, documents_as_list, projection_type='normal'):
-        if projection_type != 'normal':
-            documents_as_liste = np.vectorize(Vectorizer.get_custom_features)(documents_as_liste)
+        if projection_type == 'custom':
+            documents_as_list = np.vectorize(Vectorizer.get_custom_features)(documents_as_list)
         return self.__vectorizer.transform(documents_as_list)
 
     def save_vectorizer(self, vectorizer_path='data/vectorizer.data'):
@@ -136,6 +139,3 @@ class Vectorizer:
     def reshape_images_for_cnn(images_as_liste):
         images_as_liste.reshape(images_as_liste.shape[0], images_as_liste.shape[1], images_as_liste.shape[1], 1) \
             .astype('float32')
-
-
-

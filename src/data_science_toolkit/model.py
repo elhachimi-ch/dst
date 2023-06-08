@@ -34,7 +34,6 @@ from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifi
 
 
 
-
 class Model:
     def __init__(
         self, 
@@ -58,6 +57,7 @@ class Model:
             self.x = data_x
             self.y = data_y
         
+        self.train_percent = training_percent
         self.x = data_x
         self.y = data_y
         self.__y_pred = None
@@ -157,6 +157,7 @@ class Model:
             connections_number (int, optional): [description]. Defaults to 2.
             activation_function (str, optional): [description]. Defaults to 'relu'.
             input_shape ([type], optional): example: (weather_window,1). Defaults to None.
+            return_sequences: This hyper parameter should be set to False for the last layer and true for the other previous layers.
         """
         if input_shape is not None:
             self.__model.add(LSTM(units=connections_number, activation=activation_function, input_shape=input_shape, return_sequences=return_sequences))
@@ -202,10 +203,11 @@ class Model:
         """ dropout default initial value """
         self.__model.add(Dropout(rate_to_keep_output_value))
 
-    def train(self, loss=tensorflow.keras.losses.mse, optimizer=tensorflow.keras.optimizers.Adam(learning_rate=0.001), 
-              metrics_as_list_of_functions_or_str=['accuracy']):
+    def train(self, metrics_list=['accuracy'], loss=tensorflow.keras.losses.mse, optimizer=tensorflow.keras.optimizers.Adam(learning_rate=0.0001)):
         
         """
+        Metrics_list: ['r2'], ['accuracy'], ['mse', r2] or functions
+        
         losses and metrics for regresion:
         tensorflow.keras.losses.mse
         r2_keras
@@ -231,10 +233,10 @@ class Model:
         class SGD: Gradient descent (with momentum) optimizer.
         """
         if self.__model_type == 'dl':
-            if 'r2_keras' in metrics_as_list_of_functions_or_str:
-                metrics_as_list_of_functions_or_str.remove('r2_keras')
-                metrics_as_list_of_functions_or_str.append(self.r2_keras)
-            self.__model.compile(loss=loss, optimizer=optimizer, metrics=metrics_as_list_of_functions_or_str)
+            if 'r2' in metrics_list:
+                metrics_list.remove('r2')
+                metrics_list.append(self.r2_keras)
+            self.__model.compile(loss=loss, optimizer=optimizer, metrics=metrics_list)
             if self.__generator is not None:
                 self.history = self.__model.fit(self.get_generator(), epochs=self.__epochs, batch_size=self.__batch_size)
                 print(self.history.history)
@@ -242,10 +244,13 @@ class Model:
                 self.history = self.__model.fit(self.x, self.y, epochs=self.__epochs,
                                         batch_size=self.__batch_size, validation_split=self.__validation_percentage)
                 print(self.history.history)
-                #self.__y_pred = self.__model.predict(self.__x_test)
+                self.__y_pred = self.__model.predict(self.__x_test)
         else:
-            self.__model.fit(self.__x_train, self.__y_train)
-            self.__y_pred = self.__model.predict(self.__x_test)
+            if self.train_percent == 1:
+                self.__model.fit(self.x, self.y)
+            else:
+                self.__model.fit(self.__x_train, self.__y_train)
+                self.__y_pred = self.__model.predict(self.__x_test)
         """history_dict = history.history
         loss_values = history_dict['loss']
         val_loss_values = history_dict['val_loss']
@@ -294,36 +299,37 @@ class Model:
         data.add_column(self.__y_pred, 'y_predicted')
         data.reset_index(drop=True)
         sns.set_theme(color_codes=True)
-        x_plot = np.linspace(0, int(max(self.__y_test)))
+        fig, ax = plt.subplots(figsize=(7, 7))
+        x_plot = np.linspace(0, max(self.__y_test))
 
-        g = sns.FacetGrid(data.get_dataframe(), size = 7)
-        g = g.map(plt.scatter, "y_test", "y_predicted", edgecolor='w')
+        axx = sns.scatterplot(data=data.get_dataframe(), x="y_test", y="y_predicted", s=7, color='black', edgecolor='black')
+        #g = sns.FacetGrid(data.get_dataframe(), size = 7)
+        #g = g.map(plt.scatter, "y_test", "y_predicted", edgecolor='w')
         plt.plot(x_plot, x_plot, color='red', label='Identity line')
-        g.set_xlabels('Real values')
-        g.set_ylabels('Estimated values')
+        axx.set(xlabel='Real values', ylabel='Estimated values')
         plt.legend()
         plt.show()
         
         if savefig is True:
             g.savefig('regression_scatter.png', dpi=600)
         
-        if not np.any(self.__y_test<=0) or not np.any(self.__y_pred<=0):
+        if np.any(self.__y_test<=0) or np.any(self.__y_pred<=0):
             return {
                 'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
-                'R': np.corrcoef(self.__y_test, self.__y_pred)[0][1],
+                'R': np.corrcoef(self.__y_test.to_numpy(), np.reshape(self.__y_pred, self.__y_pred.shape[0]))[0][1],
                 'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
                 'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
                 'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
                 'MEDAE': median_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
             }
         return {
-                'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
-                'R': np.corrcoef(self.__y_test, self.__y_pred)[0][1],
-                'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
-                'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
-                'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
-                'MEDAE': median_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
-                'MSLE': mean_squared_log_error(self.__y_test, np.squeeze(self.__y_pred))
+            'R2': r2_score(self.__y_test, np.squeeze(self.__y_pred)),
+            'R': np.corrcoef(self.__y_test.to_numpy(), np.reshape(self.__y_pred, self.__y_pred.shape[0]))[0][1],
+            'MSE': mean_squared_error(self.__y_test, np.squeeze(self.__y_pred)),
+            'RMSE':sqrt(mean_squared_error(self.__y_test, np.squeeze(self.__y_pred))),
+            'MAE': mean_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
+            'MEDAE': median_absolute_error(self.__y_test, np.squeeze(self.__y_pred)),
+            'MSLE': mean_squared_log_error(self.__y_test, np.squeeze(self.__y_pred))
             }
         
     def classification_report(self, y_test=None, y_predicted=None): 
@@ -383,16 +389,15 @@ class Model:
                     x = range(1, len(loss) + 1)
                     # (1,2) one row and 2 columns
                     fig, (ax1, ax2) = plt.subplots(1, 2)
-                    fig.suptitle('Training and validation monitoring of loss and R2')
-                    ax1.plot(x, loss, 'b', label='Training loss')
-                    ax1.plot(x, val_loss, 'r', label='Validation loss')
-                    ax1.set_title('Loss monitoring')
+                    fig.suptitle('Training and validation monitoring of MSE and R²')
+                    ax1.plot(x, loss, 'b', label='Training MSE')
+                    ax1.plot(x, val_loss, 'r', label='Validation MSE')
+                    ax1.set_title('MSE monitoring')
                     ax1.legend()
-                    ax2.plot(x, r2, 'b', label='Training R2')
-                    ax2.plot(x, val_r2, 'r', label='Validation R2')
-                    ax2.set_title('R2 monitoring')
+                    ax2.plot(x, r2, 'b', label='Training R²')
+                    ax2.plot(x, val_r2, 'r', label='Validation R²')
+                    ax2.set_title('R² monitoring')
                     ax2.legend()
-                print(self.regression_report()) 
                 plt.show()
                 
             elif self.__task == 'c':
@@ -428,12 +433,12 @@ class Model:
                     plt.legend()
         else:
             if self.__task == 'r':
-                print(self.regression_report()) 
+                report = self.regression_report()
+                print(report) 
+                return report
             else:
-                print(self.classification_report()) 
-
-        return self.regression_report()
-
+                report = self.classification_report()
+                return report
                 
     def cross_validation(self, k=5, metric='r2'):
         """Cross validation
@@ -515,13 +520,29 @@ class Model:
                 scoring = "accuracy"
             
             return result.get_dataframe()
+
+    def best_model(self):
+        pass
         
-    def get_features_importance(self, features_nbr=10, savefig=False, figure_name='output.png'):
+    def features_importance(self, features_nbr=10, savefig=False, figure_name='output.png'):
+        """ show a bar chart of features importance and return a dataframe of the results
+
+        Args:
+            features_nbr (int, optional): _description_. Defaults to 10.
+            savefig (bool, optional): _description_. Defaults to False.
+            figure_name (str, optional): _description_. Defaults to 'output.png'.
+
+        Returns:
+            _type_: _description_
+        """        
         if self.__task == 'r':
             etr_model = ExtraTreesRegressor()
             etr_model.fit(self.x,self.y)
             feature_imp = pd.Series(etr_model.feature_importances_,index=self.x.columns)
-           
+            
+            data = DataFrame()
+            data.add_column(feature_imp, 'Importance')
+            data.sort(by_columns_list=['Importance'])
             # old version
             #feature_imp.nlargest(10).plot(kind='barh')
             
@@ -556,7 +577,7 @@ class Model:
             plt.show()
             # if you need a dictionary 
             model.get_booster().get_score(importance_type = 'gain')"""
-        return etr_model.feature_importances_
+        return data.get_dataframe()
     
     def dt_text_representation(self):
         return tree.export_text(self.__model)
