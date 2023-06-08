@@ -30,7 +30,7 @@ class DataFrame:
     __generator = None
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1'):
+                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name='Sheet1', usecols="A:G"):
         if data_link is not None:
             if data_type == 'csv':
                 if has_header is True:
