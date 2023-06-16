@@ -20,6 +20,7 @@ from .chart import Chart
 import numpy as np
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
+from numpy import exp, power, sqrt
 
 
 class DataFrame:
