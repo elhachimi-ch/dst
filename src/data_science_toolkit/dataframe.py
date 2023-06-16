@@ -31,18 +31,18 @@ class DataFrame:
 
     def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
                  data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name=0,
-                 skip_rows=None
+                 skip_rows=None, **kwargs
                  ):
         
         if data_link is not None:
             if data_type == 'csv':
                 if has_header is True:
                     self.dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
-                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False,
-                                               skiprows=skip_rows)
+                                               low_memory=False, on_bad_lines='skip', skip_blank_lines=False,
+                                               skiprows=skip_rows, **kwargs)
                 else:
                     self.dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
-                                               low_memory=False, error_bad_lines=False, skip_blank_lines=False,
+                                               low_memory=False, on_bad_lines='skip', skip_blank_lines=False,
                                                header=None)
             elif data_type == 'json':
                 self.dataframe = pd.read_json(data_link, encoding='utf-8')
@@ -255,14 +255,51 @@ class DataFrame:
             return self.get_dataframe().loc[lines, columns]
         return self.get_dataframe().iloc[lines, columns]
     
-    def get_n_rows_as_dataframe(self, number_of_row=10):
+    def get_rows(self, 
+                 nbr_of_rows=None, 
+                 start_index=None, 
+                 end_index=None, 
+                 index_type=None, 
+                 frequency='d', 
+                 datetime_format='%Y-%m-%d %H:%M:%S'):
         """
         give a negative value if you want begin from last row
         """
-        if number_of_row < 0:
-            return self.get_dataframe().tail(abs(number_of_row))
+        
+        if index_type == 'int':
+            if start_index is not None and end_index is not None:
+                return self.get_dataframe().iloc[start_index:end_index]
+            elif start_index is not None and nbr_of_rows is not None:
+                return self.get_dataframe().iloc[start_index:start_index+nbr_of_rows]
+            elif start_index is None and end_index is None and nbr_of_rows is not None:
+                if nbr_of_rows < 0:
+                    return self.get_dataframe().tail(abs(nbr_of_rows))
+                else:
+                    return self.get_dataframe().head(nbr_of_rows)
+        elif index_type == 'datetime':
+            if start_index is not None and end_index is not None:
+                return self.get_dataframe().loc[start_index:end_index]
+            elif start_index is not None and nbr_of_rows is not None:
+                start_index = Lib.to_datetime(start_index, datetime_format)
+                end_index = start_index + datetime.timedelta(nbr_of_rows)
+                return self.get_dataframe().loc[start_index:end_index]
+            elif start_index is None and end_index is None and nbr_of_rows is not None:
+                if nbr_of_rows < 0:
+                    return self.get_dataframe().tail(abs(nbr_of_rows))
+                else:
+                    return self.get_dataframe().head(nbr_of_rows)
         else:
-            return self.get_dataframe().head(number_of_row)
+            if start_index is not None and end_index is not None:
+                return self.get_dataframe().loc[start_index:end_index]
+            elif start_index is not None and nbr_of_rows is not None:
+                return self.get_dataframe().loc[start_index:start_index+nbr_of_rows]
+            elif start_index is None and end_index is None and nbr_of_rows is not None:
+                if nbr_of_rows < 0:
+                    return self.get_dataframe().tail(abs(nbr_of_rows))
+                else:
+                    return self.get_dataframe().head(nbr_of_rows)
+            
+        
 
     def get_column(self, column):
         return self.get_dataframe()[column]
@@ -665,7 +702,8 @@ class DataFrame:
     
     def append_dataframe(self, dataframe):
         # append dataset contents data_sets must have the same columns names
-        self.dataframe = self.dataframe.append(dataframe)
+        self.dataframe = pd.concat([self.dataframe, dataframe], ignore_index=True)
+        
 
     def join(self, dataframe, on_column='index', how='inner'):
         if on_column == 'index':
@@ -780,6 +818,12 @@ class DataFrame:
                 return self.get_dataframe().loc[self.get_column(column).apply(decision_function, args=(args[0], args[1]))]
             else:
                 return self.get_dataframe().loc[self.get_column(column).apply(decision_function)]
+            
+    def select_datetime_range(self, start_datetime, end_datetime, in_place=True, *args):
+        if in_place is True:
+            self.dataframe = self.dataframe.loc[start_datetime:end_datetime]
+        else:
+            return self.dataframe.loc[start_datetime:end_datetime]
 
     def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, in_place=True, *args):
         """_summary_
@@ -1252,12 +1296,17 @@ class DataFrame:
         return et0_data.get_dataframe()
         
         
-    def column_to_date(self, column, format='%Y-%m-%d %H:%M:%S'):
-        self.set_column(column, pd.to_datetime(self.get_column(column)))
-        self.set_column(column, self.get_column(column).dt.strftime(format))
-        self.set_column(column, pd.to_datetime(self.get_column(column)))
+    def column_to_date(self, column_name, format='%Y-%m-%d %H:%M:%S', extraction_func=None):
+        if extraction_func is None:
+            self.set_column(column_name, pd.to_datetime(self.get_column(column_name)))
+            self.set_column(column_name, self.get_column(column_name).dt.strftime(format))
+            self.set_column(column_name, pd.to_datetime(self.get_column(column_name)))
+        else:
+            self.transform_column(column_name, column_name, extraction_func)
         
-    def date_time_formate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M:%S'):
+    
+        
+    def datetime_reformate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M:%S'):
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
         return self.get_dataframe()
 
