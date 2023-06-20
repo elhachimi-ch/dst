@@ -12,14 +12,7 @@
 #
 import os
 import sys
-sys.path.insert(0, os.path.abspath('..'))
-
-import dataframe
-import src.model as model
-import src.lib as lib
-import src.chart as chart
-import src.gis as gis
-import src.imagefactory as imagefactory
+sys.path.insert(0, os.path.dirname(os.path.abspath('.')))
 
 # -- Project information -----------------------------------------------------
 
