@@ -29,36 +29,36 @@ class DataFrame:
     __vectorizer = None
     __generator = None
 
-    def __init__(self, data_link=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
+    def __init__(self, data_path=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
                  data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name=0,
                  skip_rows=None, **kwargs
                  ):
         
-        if data_link is not None:
+        if data_path is not None:
             if data_type == 'csv':
                 if has_header is True:
-                    self.dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
+                    self.dataframe = pd.read_csv(data_path, encoding='utf-8', delimiter=delimiter, 
                                                low_memory=False, on_bad_lines='skip', skip_blank_lines=False,
                                                skiprows=skip_rows, **kwargs)
                 else:
-                    self.dataframe = pd.read_csv(data_link, encoding='utf-8', delimiter=delimiter, 
+                    self.dataframe = pd.read_csv(data_path, encoding='utf-8', delimiter=delimiter, 
                                                low_memory=False, on_bad_lines='skip', skip_blank_lines=False,
-                                               header=None)
+                                               header=None, **kwargs)
             elif data_type == 'json':
-                self.dataframe = pd.read_json(data_link, encoding='utf-8')
+                self.dataframe = pd.read_json(data_path, encoding='utf-8')
             elif data_type == 'xls':
-                self.dataframe = pd.read_excel(data_link, sheet_name=sheet_name,
-                                                 skiprows=skip_rows)
+                self.dataframe = pd.read_excel(data_path, sheet_name=sheet_name,
+                                                 skiprows=skip_rows, **kwargs)
             elif data_type == 'pkl':
-                self.dataframe = pd.read_pickle(data_link)
+                self.dataframe = pd.read_pickle(data_path, **kwargs)
             elif data_type == 'dict':
-                self.dataframe = pd.DataFrame.from_dict(data_link)
+                self.dataframe = pd.DataFrame.from_dict(data_path, **kwargs)
             elif data_type == 'matrix':
-                index_name = [i for i in range(len(data_link))]
-                colums_name = [i for i in range(len(data_link[0]))]
-                self.dataframe = pd.DataFrame(data=data_link, index=index_name, columns=colums_name)
+                index_name = [i for i in range(len(data_path))]
+                colums_name = [i for i in range(len(data_path[0]))]
+                self.dataframe = pd.DataFrame(data=data_path, index=index_name, columns=colums_name, **kwargs)
             elif data_type == 'list':
-                y = data_link
+                y = data_path
                 if (not isinstance(y, pd.core.series.Series or not isinstance(y, pd.core.frame.DataFrame))):
                     y = np.array(y)
                     y = np.reshape(y, (y.shape[0],))
@@ -73,7 +73,7 @@ class DataFrame:
                 """data = array([['','Col1','Col2'],['Row1',1,2],['Row2',3,4]])
                 pd.DataFrame(data=data[1:,1:], index=data[1:,0], columns=data[0,1:]) """
             elif data_type == 'df':
-                self.dataframe = data_link
+                self.dataframe = data_path
             types = {}
             if data_types_in_order is not None and columns_names_as_list is not None:
                 self.dataframe.columns = columns_names_as_list
@@ -102,7 +102,7 @@ class DataFrame:
         else:
             nltk.download('stopwords')
             stopwords = nltk.corpus.stopwords.words(language_or_stopwords_list)
-        self.transform_column(column, column, DataFrame.remove_stopwords_lambda, in_place, stopwords)
+        self.transform_column(column, DataFrame.remove_stopwords_lambda, in_place, stopwords)
         return self.dataframe
     
     @staticmethod
@@ -164,6 +164,9 @@ class DataFrame:
         elif data_type == 'df':
             self.dataframe = data
 
+    def is_empty(self):
+        return self.get_shape()[0] == 0
+    
     def get_columns_types(self, show=True):
         types = self.get_dataframe().dtypes
         if show:
@@ -450,9 +453,47 @@ class DataFrame:
     def pivot(self, index_columns_as_list, column_columns_as_list, column_of_values, agg_func):
         return self.get_dataframe().pivot_table(index=index_columns_as_list, columns=column_columns_as_list, values=column_of_values, aggfunc=agg_func)
 
-    def group_by(self, column_name):
-        self.set_dataframe(self.get_dataframe().groupby(column_name).count())
+    def group_by(self, column_name, agg_func='sum', in_place=False, **kwargs):
+        if in_place is True:
+            if agg_func == 'sum':
+                self.set_dataframe(self.get_dataframe().groupby(column_name, **kwargs).sum())
+            elif agg_func == 'count':
+                self.set_dataframe(self.get_dataframe().groupby(column_name, **kwargs).count())
+            elif agg_func == 'min':
+                self.set_dataframe(self.get_dataframe().groupby(column_name, **kwargs).min())
+            elif agg_func == 'max':
+                self.set_dataframe(self.get_dataframe().groupby(column_name, **kwargs).max())
+            elif agg_func == 'mean':
+                self.set_dataframe(self.get_dataframe().groupby(column_name, **kwargs).mean())
+        else:
+            if agg_func == 'sum':
+                return self.get_dataframe().groupby(column_name, **kwargs).sum()
+            elif agg_func == 'count':
+                return self.get_dataframe().groupby(column_name, **kwargs).count()
+            elif agg_func == 'min':
+                return self.get_dataframe().groupby(column_name, **kwargs).min()
+            elif agg_func == 'max':
+                return self.get_dataframe().groupby(column_name, **kwargs).max()
+            elif agg_func == 'mean':
+                return self.get_dataframe().groupby(column_name, **kwargs).mean()
         
+        
+    def colmun_to_one_hot_encoding(self, column_name, drop_original_column=True, **kwargs):
+        # Perform one-hot encoding on the 'Country' column
+        df_encoded = pd.get_dummies(self.get_dataframe()[column_name], dtype=int, **kwargs)
+
+        # Concatenate the original DataFrame with the encoded columns
+        df = pd.concat([self.get_dataframe(), df_encoded], axis=1, **kwargs)
+
+        # Print the updated DataFrame
+        self.dataframe = df
+         # Drop the original 'Country' column
+        if drop_original_column is True:
+            self.drop_column(column_name)
+        
+        return self.dataframe
+    
+    
     def get_nan_indexes_of_column(self, column_name):
         return list(self.get_dataframe().loc[pd.isna(self.get_column(column_name)), :].index)
         
@@ -573,7 +614,7 @@ class DataFrame:
                         data_temp.keep_columns(['t2m'])
                         data.append_dataframe(data_temp.get_dataframe())
                     
-                    data.transform_column('t2m', 't2m', lambda o: o - 273.15)
+                    data.transform_column('t2m', lambda o: o - 273.15)
                     nan_indices = self.get_nan_indexes_of_column(column_to_fill)
                     for p in nan_indices:
                         self.set_row('Ta', p, data.get_row(p)['t2m'])
@@ -589,8 +630,8 @@ class DataFrame:
                         data_temp.reindex_dataframe("valid_time")
                         data_temp.keep_columns(['t2m', 'd2m'])
                         data.append_dataframe(data_temp.get_dataframe())
-                    data.transform_column('t2m', 't2m', lambda o: o - 273.15)
-                    data.transform_column('d2m', 'd2m', lambda o: o - 273.15)
+                    data.transform_column('t2m', lambda o: o - 273.15)
+                    data.transform_column('d2m', lambda o: o - 273.15)
                     data.add_transformed_columns('era5_hr', '100*exp(-((243.12*17.62*t2m)-(d2m*17.62*t2m)-d2m*17.62*(243.12+t2m))/((243.12+t2m)*(243.12+d2m)))')
                     nan_indices = self.get_missing_data_indexes_in_column(column_to_fill)
                     for p in nan_indices:
@@ -625,7 +666,7 @@ class DataFrame:
                     data.add_column('rg', l)
                     data.keep_columns(['rg'])
                     data.rename_columns({'rg': 'ssrd'})
-                    data.transform_column('ssrd', 'ssrd', lambda o : o if abs(o) < 1500 else 0 )    
+                    data.transform_column('ssrd', lambda o : o if abs(o) < 1500 else 0 )    
                     data.export('rg.csv', index=True)
                     nan_indices = self.get_nan_indexes_of_column(column_to_fill)
                     for p in nan_indices:
@@ -792,8 +833,12 @@ class DataFrame:
     def write_column_in_file(self, column, path='data/out.csv'):
         Lib.write_liste_in_file(path, self.get_column(column).apply(str))
 
-    def check_duplicated_rows(self):
-        return any(self.get_dataframe().duplicated())
+    def check_duplicated_rows(self, **kwargs):
+        # Count duplicated rows
+        duplicate_count = self.get_dataframe().duplicated(**kwargs).sum()
+        # Display the count of duplicated rows
+        print("Number of duplicated rows:", duplicate_count)
+        return duplicate_count
 
     def check_duplicated_in_column(self, column):
         return any(self.get_column(column).duplicated())
@@ -825,7 +870,7 @@ class DataFrame:
         else:
             return self.dataframe.loc[start_datetime:end_datetime]
 
-    def transform_column(self, column_to_trsform, column_src, fun_de_trasformation, in_place=True, *args):
+    def transform_column(self, column_name, transformation_func, in_place=True, *args):
         """_summary_
 
         Args:
@@ -840,14 +885,14 @@ class DataFrame:
         """
         if in_place is True:
             if (len(args) != 0):
-                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],)))
+                self.set_column(column_name, self.get_column(column_name).apply(transformation_func, args=(args[0],)))
             else:
-                self.set_column(column_to_trsform, self.get_column(column_src).apply(fun_de_trasformation))
+                self.set_column(column_name, self.get_column(column_name).apply(transformation_func))
         else:
             if (len(args) != 0):
-                return self.get_column(column_src).apply(fun_de_trasformation, args=(args[0],))
+                return self.get_column(column_name).apply(transformation_func, args=(args[0],))
             else:
-                return self.get_column(column_src).apply(fun_de_trasformation)
+                return self.get_column(column_name).apply(transformation_func)
             
     def to_no_accent_column(self, column):
         self.trasform_column(column, column, Lib.no_accent)
@@ -868,7 +913,7 @@ class DataFrame:
     
     def column_to_numerical_values(self, column):
         maping = list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
-        self.transform_column(column, column, lambda o : maping.index(o))
+        self.transform_column(column, lambda o : maping.index(o))
         return maping
     
     def reverse_column_from_numerical_values(self, column, maping):
@@ -1018,7 +1063,7 @@ class DataFrame:
             self.get_dataframe().to_csv(destination_path, index=index)
         elif type == 'pkl':
             self.get_dataframe().to_pickle(destination_path)
-        print('DataFrame exported successfully to /' + destination_path)
+        print('DataFrame exported successfully to ' + destination_path)
         
     def sample(self, n=10, frac=None):
         if frac is not None:
@@ -1081,13 +1126,13 @@ class DataFrame:
 
     def scale_column(self, column):
         max_column = self.get_column(column).describe()['max']
-        self.transform_column(column, column, self.scale_trasform_fun, max_column)
+        self.transform_column(column, self.scale_trasform_fun, max_column)
 
-    def drop_duplicated_rows(self, column):
-        self.set_dataframe(self.dataframe.drop_duplicates(subset=column, keep='first'))
+    def drop_duplicated_rows(self, **kwargs):
+        self.set_dataframe(self.dataframe.drop_duplicates(keep='first', **kwargs))
         
-    def drop_duplicated_indexes(self):
-        self.dataframe = self.dataframe[~self.dataframe.index.duplicated(keep='first')]
+    def drop_duplicated_indexes(self, **kwargs):
+        self.dataframe = self.dataframe[~self.dataframe.index.duplicated(keep='first', **kwargs)]
         
     def plot_dataframe(self):
         self.get_dataframe().plot()
@@ -1302,7 +1347,7 @@ class DataFrame:
             self.set_column(column_name, self.get_column(column_name).dt.strftime(format))
             self.set_column(column_name, pd.to_datetime(self.get_column(column_name)))
         else:
-            self.transform_column(column_name, column_name, extraction_func)
+            self.transform_column(column_name, extraction_func)
         
     
         
@@ -1492,7 +1537,7 @@ class DataFrame:
                 return np.log(1 + o - min_column)
             for name in columns_names_as_list:
                 min_column = self.get_column(name).min()
-                self.transform_column(name, name, log_function, min_column)
+                self.transform_column(name, log_function, min_column)
             return self.get_columns(columns_names_as_list)
                         
     def scale_dataframe(self, scaler_type='min_max', in_place=True):
@@ -1518,7 +1563,7 @@ class DataFrame:
                 return np.log(1 + o - min_column)
             for name in self.get_columns_names():
                 min_column = self.get_column(name).min()
-                self.transform_column(name, name, log_function, min_column)
+                self.transform_column(name, log_function, min_column)
         self.convert_dataframe_type()
         return self.get_dataframe()
     def load_dataset(self, dataset='iris'):
