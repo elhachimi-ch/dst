@@ -24,8 +24,6 @@ from numpy import exp, power, sqrt
 
 
 class DataFrame:
-    """
-    """
     __vectorizer = None
     __generator = None
 
@@ -33,6 +31,41 @@ class DataFrame:
                  data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name=0,
                  skip_rows=None, **kwargs
                  ):
+        """
+        Initializes an instance of the class with the provided parameters.
+
+        Args:
+            self (object): The instance of the class.
+            data_path (str or None, optional): The path to the data file. Defaults to None.
+            columns_names_as_list (list or None, optional): A list of column names. Defaults to None.
+            data_types_in_order (list or None, optional): A list of data types in the order of the columns. Defaults to None.
+            delimiter (str, optional): The delimiter used in the data file. Defaults to ','.
+            data_type (str, optional): The type of the data file. Defaults to 'csv'.
+            has_header (bool, optional): Whether the data file has a header row. Defaults to True.
+            line_index (int or None, optional): The index of the line where the data starts. Defaults to None.
+            skip_empty_line (bool, optional): Whether to skip empty lines in the data file. Defaults to False.
+            sheet_name (int or str, optional): The name or index of the sheet in the Excel file. Defaults to 0.
+            skip_rows (int or None, optional): The number of rows to skip at the beginning of the data file. Defaults to None.
+            **kwargs: Additional keyword arguments for specific data file formats or loaders.
+
+        Returns:
+            None
+
+        Notes:
+            - The __init__ method is called when initializing an instance of the class.
+            - It allows the specification of various parameters for loading and handling the data.
+            - The data_path parameter represents the path to the data file to be loaded.
+            - The columns_names_as_list parameter is a list of column names for the loaded data.
+            - The data_types_in_order parameter specifies the data types for each column in order.
+            - The delimiter parameter indicates the delimiter used in the data file (default: ',').
+            - The data_type parameter represents the type of the data file (default: 'csv').
+            - The has_header parameter specifies whether the data file has a header row (default: True).
+            - The line_index parameter indicates the index of the line where the data starts (default: None).
+            - The skip_empty_line parameter determines whether empty lines should be skipped (default: False).
+            - The sheet_name parameter represents the name or index of the sheet in an Excel file (default: 0).
+            - The skip_rows parameter specifies the number of rows to skip at the beginning of the data file (default: None).
+            - Additional keyword arguments can be provided to handle specific data file formats or loaders.
+        """
         
         if data_path is not None:
             if data_type == 'csv':
