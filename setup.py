@@ -47,5 +47,6 @@ setuptools.setup(
         "optuna",
         "contextily",
         "langdetect"
+        "xarray"
     ],
 )
