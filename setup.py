@@ -45,7 +45,6 @@ setuptools.setup(
         "nltk",
         "wordcloud",
         "optuna",
-        "contextily",
         "langdetect"
     ],
 )
