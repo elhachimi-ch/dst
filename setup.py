@@ -47,6 +47,7 @@ setuptools.setup(
         "optuna",
         "langdetect"
         "xarray",
-        "openpyxl"
+        "openpyxl",
+        "catboost"
     ],
 )
