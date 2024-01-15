@@ -47,6 +47,6 @@ setuptools.setup(
         "optuna",
         "xarray",
         "openpyxl",
-        "catboost"
+        "catboost",
     ],
 )
