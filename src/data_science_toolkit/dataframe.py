@@ -24,48 +24,23 @@ from numpy import exp, power, sqrt
 
 
 class DataFrame:
+    """
+    """
     __vectorizer = None
     __generator = None
 
-    def __init__(self, data_path=None, columns_names_as_list=None, data_types_in_order=None, delimiter=',',
-                 data_type='csv', has_header=True, line_index=None, skip_empty_line=False, sheet_name=0,
-                 skip_rows=None, **kwargs
+    def __init__(self, data_path=None,
+                 data_type='csv',
+                 columns_names_as_list=None,
+                 data_types_in_order=None,
+                 delimiter=',',
+                 has_header=True,
+                 line_index=None,
+                 skip_empty_line=False,
+                 sheet_name=0,
+                 skip_rows=None,
+                 **kwargs
                  ):
-        """
-        Initializes an instance of the class with the provided parameters.
-
-        Args:
-            self (object): The instance of the class.
-            data_path (str or None, optional): The path to the data file. Defaults to None.
-            columns_names_as_list (list or None, optional): A list of column names. Defaults to None.
-            data_types_in_order (list or None, optional): A list of data types in the order of the columns. Defaults to None.
-            delimiter (str, optional): The delimiter used in the data file. Defaults to ','.
-            data_type (str, optional): The type of the data file. Defaults to 'csv'.
-            has_header (bool, optional): Whether the data file has a header row. Defaults to True.
-            line_index (int or None, optional): The index of the line where the data starts. Defaults to None.
-            skip_empty_line (bool, optional): Whether to skip empty lines in the data file. Defaults to False.
-            sheet_name (int or str, optional): The name or index of the sheet in the Excel file. Defaults to 0.
-            skip_rows (int or None, optional): The number of rows to skip at the beginning of the data file. Defaults to None.
-            **kwargs: Additional keyword arguments for specific data file formats or loaders.
-
-        Returns:
-            None
-
-        Notes:
-            - The __init__ method is called when initializing an instance of the class.
-            - It allows the specification of various parameters for loading and handling the data.
-            - The data_path parameter represents the path to the data file to be loaded.
-            - The columns_names_as_list parameter is a list of column names for the loaded data.
-            - The data_types_in_order parameter specifies the data types for each column in order.
-            - The delimiter parameter indicates the delimiter used in the data file (default: ',').
-            - The data_type parameter represents the type of the data file (default: 'csv').
-            - The has_header parameter specifies whether the data file has a header row (default: True).
-            - The line_index parameter indicates the index of the line where the data starts (default: None).
-            - The skip_empty_line parameter determines whether empty lines should be skipped (default: False).
-            - The sheet_name parameter represents the name or index of the sheet in an Excel file (default: 0).
-            - The skip_rows parameter specifies the number of rows to skip at the beginning of the data file (default: None).
-            - Additional keyword arguments can be provided to handle specific data file formats or loaders.
-        """
         
         if data_path is not None:
             if data_type == 'csv':
@@ -426,18 +401,18 @@ class DataFrame:
     def contains(self, column, regex):
         return self.get_dataframe()[column].str.contains(regex)
 
-    def to_upper_column(self, column):
+    def column_to_upper(self, column):
         self.set_column(column, self.get_column(column).str.upper())
         
     def combine_date_and_time_columns(self, 
                                       date_column_name='date', 
                                       time_column_name='time', 
-                                      new_date_time_column_name='date_time',
+                                      new_date_time_column_name='datetime',
                                       date_time_format='%Y-%m-%d %H:%M:%S'):
         self.add_column(new_date_time_column_name, self.get_column(date_column_name).astype(str) + ' ' + self.get_column(time_column_name).astype(str))
         self.column_to_date(new_date_time_column_name, format=date_time_format)
         
-    def to_lower_column(self, column):
+    def column_to_lower(self, column):
         self.set_column(column, self.get_column(column).str.lower())
 
     def sub(self, column, pattern, replacement):
@@ -455,8 +430,8 @@ class DataFrame:
         self.dataframe = self.dataframe.drop(column_name, axis=1)
         return self.dataframe
         
-    def index_to_column(self, column_name=None):
-        self.dataframe.reset_index(drop=False, inplace=True) 
+    def index_to_column(self, column_name=None, drop_actual_index=False, **kwargs):
+        self.dataframe.reset_index(drop=drop_actual_index, inplace=True, **kwargs) 
         if column_name is not None:
             self.rename_columns({'index': column_name})
         
@@ -481,7 +456,7 @@ class DataFrame:
             self.dataframe = pd.concat([self.dataframe.iloc[:index], row, self.dataframe.iloc[index:]]).reset_index(drop=True)
             #self.reset_index()
         else:
-            self.dataframe = self.get_dataframe().append(row_as_dict, ignore_index=True)
+            self.dataframe = pd.concat([self.dataframe, pd.DataFrame([row_as_dict])], ignore_index=True)
 
     def pivot(self, index_columns_as_list, column_columns_as_list, column_of_values, agg_func):
         return self.get_dataframe().pivot_table(index=index_columns_as_list, columns=column_columns_as_list, values=column_of_values, aggfunc=agg_func)
@@ -529,8 +504,20 @@ class DataFrame:
     
     def get_nan_indexes_of_column(self, column_name):
         return list(self.get_dataframe().loc[pd.isna(self.get_column(column_name)), :].index)
+    
+    def missing_data_checking(self):
+        miss_data_columns = []
+        for c in self.dataframe.columns:
+            if any(pd.isna(self.get_dataframe()[c])) is True:
+                miss_data_columns.append(c)
+        if len(miss_data_columns) > 0:
+            print(f'The data contains missing values in columns {miss_data_columns}')
+        else:
+            print(f'No column contains missing data')
+            
+        return len(miss_data_columns) > 0
         
-    def missing_data_checking(self, column_name=None):
+    def missing_data_statistics(self, column_name=None):
         if column_name is not None:
             if any(pd.isna(self.get_dataframe()[column_name])) is True:
                 miss = self.dataframe[column_name].isnull().sum()
@@ -548,7 +535,6 @@ class DataFrame:
                 else:
                     print("{} has NO missing value!".format(c))
                 miss.append(miss_by_column)
-        return miss
     
     def missing_data_column_percent(self, column_name):
         return self.dataframe[column_name].isnull().sum()/self.get_shape()[0]
@@ -778,12 +764,21 @@ class DataFrame:
         # append dataset contents data_sets must have the same columns names
         self.dataframe = pd.concat([self.dataframe, dataframe], ignore_index=True)
         
-
     def join(self, dataframe, on_column='index', how='inner'):
         if on_column == 'index':
            self.dataframe = pd.merge(self.get_dataframe(), dataframe, left_index=True, right_index=True, how=how)
         else:
             self.dataframe = pd.merge(self.dataframe, dataframe, on=on_column, how=how)
+            
+    def interpolate_time_series(self, column_name, freq='d', method='linear', **kwargs):
+        
+        start_datetime = self.dataframe.index.min()
+        end_datetime = self.dataframe.index.max()
+        data_temp = DataFrame(self.generate_datetime_range_dataframe(start_datetime, end_datetime, freq=freq), 'df')
+        data_temp.join(self.get_dataframe(), how='left')
+
+        # Perform linear interpolation to fill missing values
+        self.dataframe = data_temp.dataframe.interpolate(method=method)
 
     def left_join(self, dataframe, column):
         self.dataframe = pd.merge(self.dataframe, dataframe, on=column, how='left')
@@ -883,25 +878,36 @@ class DataFrame:
         for p in self.get_dataframe().values:
             Lib.write_line_in_file(dossier + str(p[0]).lower() + '.csv', p[column_index])
 
-    def filter_dataframe(self, column, decision_function, in_place=True, *args):
+    def filter_dataframe(self, column_name, decision_function, in_place=True, *args):
         if in_place is True:
             if len(args) == 2:
                 self.set_dataframe(
-                    self.get_dataframe().loc[self.get_column(column).apply(decision_function, args=(args[0], args[1]))])
+                    self.get_dataframe().loc[self.get_column(column_name).apply(decision_function, args=(args[0], args[1]))])
             else:
                 self.set_dataframe(
-                    self.get_dataframe().loc[self.get_column(column).apply(decision_function)])
+                    self.get_dataframe().loc[self.get_column(column_name).apply(decision_function)])
         else:
             if len(args) == 2:
-                return self.get_dataframe().loc[self.get_column(column).apply(decision_function, args=(args[0], args[1]))]
+                return self.get_dataframe().loc[self.get_column(column_name).apply(decision_function, args=(args[0], args[1]))]
             else:
-                return self.get_dataframe().loc[self.get_column(column).apply(decision_function)]
+                return self.get_dataframe().loc[self.get_column(column_name).apply(decision_function)]
             
-    def select_datetime_range(self, start_datetime, end_datetime, in_place=True, *args):
+    def select_datetime_range(self, start_datetime, end_datetime, datetime_format='%Y-%m-%d %H:%M:%S', in_place=True, **kwargs):
+        #start_datetime = datetime.strptime(start_datetime, datetime_format)
+        #end_datetime = datetime.strptime(end_datetime, datetime_format)
         if in_place is True:
-            self.dataframe = self.dataframe.loc[start_datetime:end_datetime]
+            self.dataframe = self.dataframe[(self.dataframe.index >= start_datetime) & (self.dataframe.index <= end_datetime)]
         else:
-            return self.dataframe.loc[start_datetime:end_datetime]
+            return self.dataframe[(self.dataframe.index >= start_datetime) & (self.dataframe.index <= end_datetime)]
+    
+    def ignore_time_in_datetime(self, datetime_column_name='datetime', in_place=True, *args):
+        self.transform_column(datetime_column_name, lambda o: datetime.strptime(o.date().isoformat(), "%Y-%m-%d"), in_place=in_place)
+        
+    def ignore_day_in_date(self, datetime_column_name='datetime', in_place=True, *args):
+        # Extract year and month from the 'date' column
+        self.dataframe['year_month'] = self.dataframe[datetime_column_name].dt.to_period('M')
+        self.drop_column(datetime_column_name)
+        self.rename_columns({'year_month': datetime_column_name})
 
     def transform_column(self, column_name, transformation_func, in_place=True, *args):
         """_summary_
@@ -927,16 +933,23 @@ class DataFrame:
             else:
                 return self.get_column(column_name).apply(transformation_func)
             
-    def to_no_accent_column(self, column):
-        self.trasform_column(column, column, Lib.no_accent)
+    def column_to_no_accent(self, column):
+        self.transform_column(column, Lib.no_accent)
         self.set_column(column, self.get_column(column))
+        
+    def column_keep_only_alphanumeric(self, column_name):
+        from re import sub
+        pattern = r'[^a-zA-Z0-9\s]'
+        self.transform_column(column_name, lambda o: sub(pattern, '', o))
 
     def write_dataframe_in_file(self, out_file='data/out.csv', delimiter=','):
         Lib.write_liste_csv(self.get_dataframe().values, out_file, delimiter)
 
-    def sort(self, by_columns_list, ascending=False):
-        self.set_dataframe(self.get_dataframe().sort_values(by=by_columns_list, ascending=ascending,
-                                                              na_position='first'))
+    def sort(self, by_column_name_list=None, ascending=True, **kwargs):
+        if by_column_name_list is None:
+            self.dataframe.sort_index(ascending=ascending, inplace=True,**kwargs)
+        else:
+            self.set_dataframe(self.get_dataframe().sort_values(by=by_column_name_list, ascending=ascending, **kwargs))
 
     def count_occurence_of_each_row(self, column):
         return self.get_dataframe().pivot_table(index=[column], aggfunc='size')
@@ -944,10 +957,11 @@ class DataFrame:
     def get_distinct_values_as_list(self, column):
         return list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
     
-    def column_to_numerical_values(self, column):
-        maping = list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
-        self.transform_column(column, lambda o : maping.index(o))
-        return maping
+    def encode_textual_column(self, column):
+        mapping = list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
+        self.transform_column(column, lambda o : mapping.index(o))
+        mapping_dict = {index: value for index, value in enumerate(mapping)}
+        return mapping_dict
     
     def reverse_column_from_numerical_values(self, column, maping):
         self.trasform_column(column, column, lambda o : maping[int(o)])
@@ -1136,21 +1150,25 @@ class DataFrame:
 
     def show(self, number_of_row=None):
         if number_of_row is None:
+            print(self.get_dataframe())
             return self.get_dataframe()
         elif number_of_row < 0:
+            print(self.get_dataframe().tail(abs(number_of_row)))
             return self.get_dataframe().tail(abs(number_of_row)) 
         else:
+            print(self.get_dataframe().head(number_of_row))
             return self.get_dataframe().head(number_of_row) 
 
-    def get_sliced_dataframe(self, line_tuple, columns_tuple):
-        return self.get_dataframe().loc[line_tuple[0]:line_tuple[1], columns_tuple[0]: columns_tuple[1]]
+    def get_sliced_dataframe(self, start_row=None, end_row=None, start_column=None, end_column=None):
+        return self.get_dataframe().loc[start_row:end_row, start_column: end_column]
     
-    def compare_two_times(self, time_series1_column_name, time_series2_column_name):
+    def compare_two_time_series(self, time_series1_column_name, time_series2_column_name):
         from sklearn.metrics import r2_score, mean_squared_error 
         import math
         comparaison_dict = {}
         comparaison_dict['RMSE'] = math.sqrt(mean_squared_error(self.get_column(time_series1_column_name), self.get_column(time_series2_column_name)))
         comparaison_dict['R²'] = r2_score(self.get_column(time_series1_column_name), self.get_column(time_series2_column_name))
+        comparaison_dict['R'] = self.get_column(time_series1_column_name).corr(self.get_column(time_series2_column_name))
         return comparaison_dict
 
     def eliminate_outliers_quantile(self, column, min_quantile, max_quantile):
@@ -1164,27 +1182,32 @@ class DataFrame:
     def drop_duplicated_rows(self, **kwargs):
         self.set_dataframe(self.dataframe.drop_duplicates(keep='first', **kwargs))
         
-    def drop_duplicated_indexes(self, **kwargs):
-        self.dataframe = self.dataframe[~self.dataframe.index.duplicated(keep='first', **kwargs)]
+    def drop_duplicated_indexes(self, level=None,**kwargs):
+        if level == 'd':
+            self.dataframe = self.dataframe.groupby(self.dataframe.index.date).first()
+        else:
+            self.dataframe = self.dataframe[~self.dataframe.index.duplicated(keep='first', **kwargs)]
         
-    def plot_dataframe(self):
-        self.get_dataframe().plot()
+    def plot_dataframe(self, **kwarks):
+        self.get_dataframe().plot(**kwarks)
         plt.show()
         
     def to_numpy(self):
         return self.get_dataframe().values
     
     @staticmethod
-    def generate_datetime_range_dataframe(starting_datetime='2013-01-01 00:00:00', 
+    def generate_datetime_range_dataframe(start_datetime='2013-01-01 00:00:00', 
                                           end_datetime='2013-12-31 00:00:00', 
                                           periods=None, 
                                           freq='1H'):
         dataframe = DataFrame()
         dataframe.set_dataframe_index(DataFrame.generate_datetime_range(
-            starting_datetime=starting_datetime, 
+            starting_datetime=start_datetime, 
             end_datetime=end_datetime, 
             periods=periods,
             freq=freq))
+        dataframe.rename_index('datetime')
+        
         return dataframe.get_dataframe()
     
     def info(self):
@@ -1382,10 +1405,16 @@ class DataFrame:
         else:
             self.transform_column(column_name, extraction_func)
         
-    
-        
     def datetime_reformate(self, date_time_column_name, new_format='%Y-%m-%d %H:%M:%S'):
         self.set_column(date_time_column_name, self.get_column(date_time_column_name).dt.strftime(new_format))
+        return self.get_dataframe()
+    
+    def split_date_and_time_as_colmns(self, datetime_column_name):
+        # Extract the date and time as new columns
+        self.dataframe['time'] = self.dataframe[datetime_column_name].dt.time
+        self.ignore_time_in_datetime(datetime_column_name)
+        self.rename_columns({datetime_column_name: 'date'})
+        #self.dataframe['date'] = self.dataframe[datetime_column_name].dt.date
         return self.get_dataframe()
 
     def resample_timeseries(self, 
@@ -1398,10 +1427,13 @@ class DataFrame:
                             in_place=True):
         if in_place is True:
             if skip_rows is not None:
+                index_name = self.dataframe.index.name
+                self.index_to_column()
                 self.set_dataframe(self.get_dataframe().loc[intitial_index:self.get_shape()[0]:skip_rows])
-                self.reset_index()
+                self.reindex_dataframe(index_name)
             else:
                 if date_column_name is not None:
+                    self.column_to_date(date_column_name)
                     self.reindex_dataframe(date_column_name)
                     
                 if between_time_tuple is not None:
@@ -1531,8 +1563,31 @@ class DataFrame:
     def shuffle_dataframe(self):
         self.set_dataframe(self.get_dataframe().sample(frac=1).reset_index(drop=True))
         
-    def add_doy_column(self, date_time_column_name='date_time'):
-        self.add_column('doy', self.get_column(date_time_column_name).dt.day_of_year)
+    def add_doy_column(self, new_column_name='doy', datetime_column_name='datetime'):
+        try:
+            self.add_column(new_column_name, self.get_column(datetime_column_name).dt.day_of_year)
+        except AttributeError as e:
+            print(f'Try to convert {datetime_column_name} to datetime first.')
+            
+    def add_month_column(self, new_column_name='month', datetime_column_name='datetime'):
+        try:
+            self.add_column(new_column_name, self.get_column(datetime_column_name).dt.month)
+        except AttributeError as e:
+            print(f'Try to convert {datetime_column_name} to datetime first.')
+            
+    def add_year_column(self, new_column_name='year', datetime_column_name='datetime'):
+        try:
+            self.add_column(new_column_name, self.get_column(datetime_column_name).dt.year)
+        except AttributeError as e:
+            print(f'Try to convert {datetime_column_name} to datetime first.')
+        
+    def datetime_to_doy(self, new_column_name='doy', date_time_column_name='datetime'):
+        try:
+            self.add_column(new_column_name, self.get_column(date_time_column_name).dt.day_of_year)
+            self.drop_column(date_time_column_name)
+            self.rename_columns({new_column_name: date_time_column_name})
+        except AttributeError as e:
+            print(f'Try to convert {date_time_column_name} to datetime first.')
         
     def add_month_day_column(self, date_time_column_name='date_time'):
         self.add_column('month-day', self.get_column(date_time_column_name).dt.month.astype(str) + '-' + self.get_column(date_time_column_name).dt.day.astype(str))
@@ -1604,23 +1659,14 @@ class DataFrame:
         boston: Load and return the boston house-prices dataset (regression)
         iris: Load and return the iris dataset (classification).
         """
-        if dataset == 'boston':
-            data = load_boston()
-            x = data.data
-            y = data.target
-            features_names = data.feature_names
-            self.set_dataframe(x, data_type='matrix')
-            self.rename_columns(features_names, all_columns=True)
-            self.add_column('house_price', y)
-            
-        elif dataset == 'iris':
+        if dataset == 'iris':
             data = load_iris(as_frame=True)
             x = data.data
             y = data.target
             self.set_dataframe(x)
             self.add_column('target', y)  
             
-    def similarity_measure_as_column(self, column_name1, column_name2, similarity_method='cosine', weighting_method='tfidf'):
+    def similarity_measure(self, column_name1, column_name2, similarity_method='cosine', weighting_method='tfidf'):
         if similarity_method == 'cosine':
             corpus = self.get_column_as_list(column_name1) + self.get_column_as_list(column_name2)
             vectorizer = Vectorizer(corpus, weighting_method)
@@ -1628,10 +1674,19 @@ class DataFrame:
             print(len(self.get_column_as_list(column_name2)))
             new_column = []
             for p in zip(self.get_column_as_list(column_name1), self.get_column_as_list(column_name2)):
-                print(p)
                 new_column.append(vectorizer.cosine_similarity(p[0], p[1])) 
             
             self.add_column('Similarity score', new_column)
+        
+        elif similarity_method == 'ts':
+            from sklearn.metrics import r2_score, mean_squared_error
+            import math
+            comparaison_dict = {}
+            comparaison_dict['RMSE'] = math.sqrt(mean_squared_error(self.get_column(column_name1), self.get_column(column_name2)))
+            comparaison_dict['R²'] = r2_score(self.get_column(column_name1), self.get_column(column_name2))
+            comparaison_dict['R'] = self.get_column(column_name1).corr(self.get_column(column_name2))
+            
+            return comparaison_dict
         
         return self.get_dataframe()
         

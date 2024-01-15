@@ -45,8 +45,11 @@ class Model:
         epochs=50, 
         batch_size=32, 
         generator=None,
-        validation_percentage=0.2
+        validation_percentage=0.2,
+        **kwargs
         ):
+        from sklearn.model_selection import train_test_split
+        
         
         if training_percent != 1:
             self.__x_train, self.__x_test, self.__y_train, self.__y_test = train_test_split(data_x, 
@@ -72,51 +75,90 @@ class Model:
         self.__validation_percentage = validation_percentage
         
         if model_type == 'dt':
+            from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+            
             if task == 'c':
-                self.__model = tree.DecisionTreeClassifier()
+                self.__model = DecisionTreeClassifier()
             else:
-                self.__model = tree.DecisionTreeRegressor()
+                self.__model = DecisionTreeRegressor()
 
         elif model_type == 'svm':
+            from sklearn.svm import SVC, SVR
+            
             if task == 'c':
-                self.__model = svm.SVC()
+                self.__model = SVC()
             else:
-                self.__model = svm.SVR()
+                self.__model = SVR()
                 
         elif model_type == 'lr':
+            from sklearn.linear_model import LogisticRegression, LinearRegression
+            
             if task == 'c':
                 self.__model = LogisticRegression(random_state=2)
             else:
                 self.__model = LinearRegression()
 
         elif model_type == 'nb':
+            from sklearn.naive_bayes import GaussianNB, MultinomialNB
+            
             if task == 'c':
                 self.__model = MultinomialNB()
             else:
                 self.__model = GaussianNB()
         
         elif model_type == 'rf':
+            from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+            
             if task == 'c':
                 self.__model = RandomForestClassifier()
             else:
                 self.__model = RandomForestRegressor()
                 
+        elif model_type == 'ab':
+            from sklearn.ensemble import AdaBoostClassifier, AdaBoostRegressor
+            
+            if task == 'c':
+                self.__model = AdaBoostClassifier()
+            else:
+                self.__model = AdaBoostRegressor()
+                
         elif model_type == 'xb':
+            from xgboost import XGBClassifier, XGBRegressor
+            
             if task == 'c':
                 self.__model = XGBClassifier()
             else:
                 self.__model = XGBRegressor()
+                
+        elif model_type == 'cb':
+            from catboost import CatBoostRegressor, CatBoostClassifier
+            
+            if task == 'c':
+                self.__model = CatBoostClassifier(learning_rate=1, depth=6, loss_function='RMSE', **kwargs)
+            else:
+                self.__model = CatBoostRegressor(learning_rate=1, depth=6, loss_function='RMSE', **kwargs)
 
         elif model_type == 'dl':
+            import tensorflow.keras.optimizers
+            from tensorflow.keras import backend as K
+            from tensorflow.keras.layers import Dense, Conv2D, Flatten, MaxPooling2D, Dropout, MaxPool1D, Conv1D, Reshape, LSTM
+            from tensorflow.keras.models import Sequential
+            from tensorflow.keras.losses import mse as tf_mse
+            from tensorflow.keras.optimizers import Adam
+            
             self.__model = Sequential()
 
         elif model_type == 'knn':
+            from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+            
             if task == 'c':
                 self.__model = KNeighborsClassifier(n_neighbors=5)
             else:
                 self.__model = KNeighborsRegressor(n_neighbors=5)
                 
         elif model_type == 'gb':
+            from sklearn.ensemble import GradientBoostingRegressor, GradientBoostingClassifier
+            
             if task == 'c':
                 self.__model = GradientBoostingClassifier()
             else:
@@ -203,8 +245,7 @@ class Model:
         """ dropout default initial value """
         self.__model.add(Dropout(rate_to_keep_output_value))
 
-    def train(self, metrics_list=['accuracy'], loss=tensorflow.keras.losses.mse, optimizer=tensorflow.keras.optimizers.Adam(learning_rate=0.0001)):
-        
+    def train(self, metrics_list=['accuracy'], loss=None, optimizer=None):
         """
         Metrics_list: ['r2'], ['accuracy'], ['mse', r2] or functions
         
@@ -233,6 +274,12 @@ class Model:
         class SGD: Gradient descent (with momentum) optimizer.
         """
         if self.__model_type == 'dl':
+            if loss is None:
+                loss = tf_mse
+            
+            if optimizer is None:
+                optimizer = Adam(learning_rate=0.0001)
+            
             if 'r2' in metrics_list:
                 metrics_list.remove('r2')
                 metrics_list.append(self.r2_keras)
@@ -290,13 +337,15 @@ class Model:
         """
         pass y_test and y_predected as pandas serie is get_column
         """
+        from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error, mean_squared_log_error, mean_absolute_error, classification_report
+
         
         if y_test is not None and y_predicted is not None:
             self.__y_test = y_test
             self.__y_pred = y_predicted
         
         data = DataFrame(self.__y_test, data_type='list', columns_names_as_list=['y_test'], data_types_in_order=[float])
-        data.add_column(self.__y_pred, 'y_predicted')
+        data.add_column('y_predicted', self.__y_pred)
         data.reset_index(drop=True)
         sns.set_theme(color_codes=True)
         fig, ax = plt.subplots(figsize=(7, 7))
@@ -336,9 +385,14 @@ class Model:
         """
         pass y_test and y_predected as pandas serie is get_column
         """
+        
+        from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error, mean_squared_log_error, mean_absolute_error, classification_report
         if y_test is not None and y_predicted is not None:
             self.__y_test = y_test
-        return classification_report(self.__y_test, self.__y_pred)
+        
+        classification_report_results = classification_report(self.__y_test, self.__y_pred)
+        print(classification_report_results)
+        return classification_report_results
         
     def roc_curve(self):
         fpr, tpr, thresholds = roc_curve(self.__y_test, self.__y_pred)
@@ -364,9 +418,11 @@ class Model:
         return self.__boosted_model.predict(x_to_pred)
 
     def save_model(self, model_path='data/model.data'):
+        from joblib import dump
         dump(self.__model, model_path) 
 
     def load_model(self, model_path):
+        from joblib import load
         self.__model = load(model_path)
 
     def report(self):
@@ -493,6 +549,7 @@ class Model:
             'rand_score'
             'v_measure_score'
         """
+        from sklearn.model_selection import cross_val_score, KFold
         
         if self.__model_type == 'dl':
             cross_val_score_list = []
@@ -512,10 +569,16 @@ class Model:
                 r2_results = cross_val_score(self.__model, self.x, self.y, cv=k, scoring='r2')
                 rmse_results = cross_val_score(self.__model, self.x, self.y, cv=k, scoring='neg_mean_squared_error')
                 result = DataFrame()
-                result.add_column([i for i in range(1, k+1)], 'Folds')
-                result.add_column(r2_results, 'R2')
-                result.add_column(rmse_results, 'RMSE')
-                result.transform_column('RMSE', 'RMSE', lambda x: -x)
+                result.add_column('Folds', [i for i in range(1, k+1)])
+                result.add_column('R2', r2_results)
+                result.add_column('RMSE', rmse_results)
+                result.transform_column('RMSE', lambda x: np.sqrt(-1*x))
+                
+                mean_row = result.dataframe.mean()
+                # Add the mean row to the DataFrame
+                result.add_row({'Folds': 'Mean', 'R2':mean_row['R2'], 'RMSE':mean_row['RMSE']})
+                
+                
             elif self.__task == 'c':
                 scoring = "accuracy"
             
@@ -534,15 +597,17 @@ class Model:
 
         Returns:
             _type_: _description_
-        """        
+        """    
+        from sklearn.ensemble import ExtraTreesRegressor, ExtraTreesClassifier
+            
         if self.__task == 'r':
             etr_model = ExtraTreesRegressor()
             etr_model.fit(self.x,self.y)
             feature_imp = pd.Series(etr_model.feature_importances_,index=self.x.columns)
             
             data = DataFrame()
-            data.add_column(feature_imp, 'Importance')
-            data.sort(by_columns_list=['Importance'])
+            data.add_column('Importance', feature_imp)
+            data.sort(by_column_name_list=['Importance'], ascending=False)
             # old version
             #feature_imp.nlargest(10).plot(kind='barh')
             
@@ -583,6 +648,8 @@ class Model:
         return tree.export_text(self.__model)
     
     def plot_dt_representation(self, viz_type='graph_viz'):
+        import graphviz
+        
         if viz_type == 'graph_viz':
             
             # DOT data
@@ -613,6 +680,8 @@ class Model:
         plt.ylabel('target value')
         
     def fine_tune(self, dict_params=None, n_trials=10):
+        import optuna
+        
         def objective(trial):
             if self.__model_type == "svm":
                 kernels = ['linear', 'poly', 'rbf', 'sigmoid']
@@ -654,4 +723,4 @@ class Model:
     def r2_keras(y_true, y_pred):
         SS_res =  K.sum(K.square( y_true-y_pred ))
         SS_tot = K.sum(K.square( y_true - K.mean(y_true) ) )
-        return ( 1 - SS_res/(SS_tot + K.epsilon()) )
+        return ( 1 - SS_res/(SS_tot + K.epsilon()) ) 
