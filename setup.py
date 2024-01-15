@@ -45,7 +45,6 @@ setuptools.setup(
         "nltk",
         "wordcloud",
         "optuna",
-        "langdetect"
         "xarray",
         "openpyxl",
         "catboost"
