@@ -398,19 +398,46 @@ class DataFrame:
             self.dataframe = self.dataframe.sort_values(order_by, ascending=ascending)
         return self.dataframe[select]
 
-    def contains(self, column, regex):
-        return self.get_dataframe()[column].str.contains(regex)
+    def contains(self, column_name, regex):
+        return self.get_dataframe()[column_name].str.contains(regex)
 
-    def column_to_upper(self, column):
-        self.set_column(column, self.get_column(column).str.upper())
+    def column_to_upper(self, column_name):
+        self.set_column(column_name, self.get_column(column_name).str.upper())
+        
+    def column_to_celsius(self, column_name):
+        self.apply_fun_to_column(column_name, lambda x: x - 273.15)
+        
+    def column_to_kelvin(self, column_name):
+        self.apply_fun_to_column(column_name, lambda x: x + 273.15)
         
     def combine_date_and_time_columns(self, 
                                       date_column_name='date', 
                                       time_column_name='time', 
                                       new_date_time_column_name='datetime',
-                                      date_time_format='%Y-%m-%d %H:%M:%S'):
-        self.add_column(new_date_time_column_name, self.get_column(date_column_name).astype(str) + ' ' + self.get_column(time_column_name).astype(str))
+                                      date_time_format='%Y-%m-%d %H:%M:%S',
+                                      time_column_format='standard_time',
+                                      new_time_column_name='time',
+                                      drop_date_and_time_columns=True):
+        
+        if time_column_format == 'standard_time':
+            self.add_column(new_date_time_column_name, self.get_column(date_column_name).astype(str) + ' ' + self.get_column(time_column_name).astype(str))
+        elif time_column_format == 'military_time':
+            self.military_time_to_standard_time(time_column_name, new_time_column_name)
+            self.add_column(new_date_time_column_name, self.get_column(date_column_name).astype(str) + ' ' + self.get_column(new_time_column_name).astype(str))
+        
         self.column_to_date(new_date_time_column_name, format=date_time_format)
+        self.transform_column(new_date_time_column_name, lambda d: d + timedelta(days=1) if d.hour == 0 else d)
+        
+        if drop_date_and_time_columns is True:
+            self.drop_columns([date_column_name, time_column_name])
+        
+    def military_time_to_standard_time(self, military_time_column_name, new_time_column_name='time'):
+        # Pad with zeros to ensure it is four digits
+        self.transform_column(military_time_column_name, lambda x: str(int(x)).zfill(4))
+        self.transform_column(military_time_column_name, lambda x: '0000' if x == '2400' else x)
+        # First two digits are the hour
+        # Last two digits are the minutes
+        self.add_column_based_on_function(new_time_column_name, lambda row: pd.Timestamp(f'{int(row[military_time_column_name][:2])}:{int(row[military_time_column_name][2:])}').time())
         
     def column_to_lower(self, column):
         self.set_column(column, self.get_column(column).str.lower())
@@ -1102,7 +1129,7 @@ class DataFrame:
     def export_column(self, column_name, out_file='out.csv'):
         self.get_column(column_name).to_csv(out_file, index=False)
     
-    def export(self, destination_path='data/json_dataframe.csv', type='csv', index=False):
+    def export(self, destination_path='data/json_dataframe.csv', type='csv', index=True):
         if type == 'json':
             destination_path='data/json_dataframe.json'
             self.get_dataframe().to_json(destination_path)
@@ -1424,6 +1451,7 @@ class DataFrame:
                             intitial_index=0, 
                             between_time_tuple=None,
                             date_column_name=None,
+                            specific_hour_day=11,
                             in_place=True):
         if in_place is True:
             if skip_rows is not None:
@@ -1437,7 +1465,9 @@ class DataFrame:
                     self.reindex_dataframe(date_column_name)
                     
                 if between_time_tuple is not None:
+                    temp_time_series = self.get_dataframe()
                     temp_time_series = temp_time_series.between_time(between_time_tuple[0], between_time_tuple[1])
+                    self.dataframe = temp_time_series
                     
                 if agg == 'sum':
                     self.set_dataframe(self.dataframe.resample(frequency).sum())
@@ -1457,6 +1487,12 @@ class DataFrame:
                     self.set_dataframe(self.dataframe.resample(frequency).ffill())
                 if agg == 'bfill':
                     self.set_dataframe(self.dataframe.resample(frequency).bfill())
+                if agg == 'specific_hour_day':
+                    # Filtering the DataFrame to keep only rows at 'hour_of_day'
+                    self.dataframe = self.dataframe[self.dataframe.index.hour == specific_hour_day]
+                    # Resampling the DataFrame to daily frequency
+                    # 'first' is used here to take the first available value for each day, which should be unique in this scenario
+                    self.set_dataframe(self.dataframe.resample('D').first())
                 else:
                     self.set_dataframe(self.dataframe.resample(frequency).mean())
             return self.get_dataframe()
@@ -1560,6 +1596,15 @@ class DataFrame:
     def dataframe_skip_columns(self, intitial_index, final_index, step=2):
         self.set_dataframe(self.get_dataframe().loc[intitial_index:final_index:step])
         
+    def class_distribution(self, class_column_name):
+        class_distribution = self.get_column(class_column_name).value_counts()
+        class_distribution.plot(kind='pie', autopct='%1.1f%%')
+        plt.title('Class Distribution')
+        plt.xlabel('Class')
+        plt.ylabel('Percentage')
+        plt.show()
+        return class_distribution
+        
     def shuffle_dataframe(self):
         self.set_dataframe(self.get_dataframe().sample(frac=1).reset_index(drop=True))
         
@@ -1568,6 +1613,13 @@ class DataFrame:
             self.add_column(new_column_name, self.get_column(datetime_column_name).dt.day_of_year)
         except AttributeError as e:
             print(f'Try to convert {datetime_column_name} to datetime first.')
+            
+    def add_hod_column(self, new_column_name='hod', datetime_column_name='datetime'):
+        try:
+            self.add_column(new_column_name, self.get_column(datetime_column_name).dt.hour)
+        except AttributeError as e:
+            print(f'Try to convert {datetime_column_name} to datetime first.')
+        
             
     def add_month_column(self, new_column_name='month', datetime_column_name='datetime'):
         try:
