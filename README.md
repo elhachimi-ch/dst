@@ -136,3 +136,26 @@ MIT License. See the LICENSE file for details.
 
 If you use DST in academic work, please cite the repository and (optionally) reference the Code Ocean capsule for reproducibility: https://codeocean.com/capsule/1309232/tree
 
+Additionally, please cite the following paper:
+
+El Hachimi, Chouaib; Belaqziz, Salwa; Khabba, Saïd; Chehbouni, Abdelghani. 2022. "Data Science Toolkit: An All-in-One Python Library to Help Researchers and Practitioners in Implementing Data Science-Related Algorithms with Less Effort." Software Impacts 12:100240. https://doi.org/10.1016/J.SIMPA.2022.100240
+
+BibTeX (optional):
+
+```bibtex
+@article{ElHachimi2022,
+   author = {Chouaib El Hachimi and Salwa Belaqziz and Saïd Khabba and Abdelghani Chehbouni},
+   doi = {10.1016/J.SIMPA.2022.100240},
+   issn = {2665-9638},
+   journal = {Software Impacts},
+   month = {5},
+   pages = {100240},
+   publisher = {Elsevier},
+   title = {Data Science Toolkit: An all-in-one python library to help researchers and practitioners in implementing data science-related algorithms with less effort},
+   volume = {12},
+   url = {https://linkinghub.elsevier.com/retrieve/pii/S2665963822000124},
+   year = {2022}
+}
+
+```
+
