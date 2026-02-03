@@ -1,13 +1,11 @@
+from .lib import Lib # from .lib import Lib in production
 import numpy as np
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 import joblib
-from tensorflow.keras.utils import to_categorical
-from .lib import Lib
 from sklearn.preprocessing import MinMaxScaler
 import nltk
 from sklearn.metrics.pairwise import cosine_similarity
-
 
 class Vectorizer:
     __vectorizer = None
@@ -126,6 +124,8 @@ class Vectorizer:
     def to_one_hot(vecteur_of_categories):
         """converti une colone avec des categorie mais numerique en forme One Hot Encoding exemple versicolor
         est de label 2 se transform en [0 0 1]"""
+        
+        from tensorflow.keras.utils import to_categorical
         return Lib.to_categorical(vecteur_of_categories)
 
     @staticmethod
@@ -139,3 +139,6 @@ class Vectorizer:
     def reshape_images_for_cnn(images_as_liste):
         images_as_liste.reshape(images_as_liste.shape[0], images_as_liste.shape[1], images_as_liste.shape[1], 1) \
             .astype('float32')
+
+
+

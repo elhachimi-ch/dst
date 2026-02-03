@@ -10,12 +10,15 @@ import pandas as pd
 
 class Chart:
     chart_type_list = ['line', 'bar', 'box', 'swarm', 'strip_swarm', 'count', 'scatter', 'dist', 'point', 'pair',
-                  'correlation_map', 'reg', 'heat_map']
+                  'correlation_map', 'reg', 'heat_map', 'pie']
 
     def __init__(self, dataframe=None, column4x=None, chart_type='pair', group_by=None, columns_names_list=None, plotly=False):
         self.dataframe = dataframe
         if column4x is None:
-            self.column4x = dataframe.index
+            if dataframe is None:
+                self.column4x = None
+            else:
+                self.column4x = dataframe.index
         else:
             self.column4x = column4x
         self.chart_type = chart_type
@@ -25,7 +28,10 @@ class Chart:
         sns.set_theme(color_codes=True)
         
 
-    def add_data_to_show(self, data_column=None, column4hover=None, column4size=None, y_column=None, color=None):
+    def add_data_to_show(self, data_column=None, column4hover=None, column4size=None, 
+                         y_column=None, 
+                         color=None,
+                         labels=None):
         print(self.chart_type)
         if self.plotly == True:
             if self.chart_type == self.chart_type_list[0]:
@@ -99,6 +105,13 @@ class Chart:
                 # Draw the heatmap with the mask and correct aspect ratio
                 self.ax = sns.heatmap(corr, mask=mask, cmap=cmap, vmax=.3, center=0,
                             square=True, linewidths=.5, cbar_kws={"shrink": .5})
+            elif self.chart_type == self.chart_type_list[13]:
+                data = data_column
+                #define Seaborn color palette to use
+                colors = sns.color_palette('pastel')[0:5]
+
+                #create pie chart
+                self.ax = plt.pie(data, labels = labels, colors = colors, autopct='%.0f%%')
             return self.ax
     
     def plot_on_map(self,

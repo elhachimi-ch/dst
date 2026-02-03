@@ -5,6 +5,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from skimage.filters import threshold_local
 
+
 class ImageFactory:
     def __init__(self, img_link=None, url=False):
         self.__img = None

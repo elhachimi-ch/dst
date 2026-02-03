@@ -1,10 +1,17 @@
-import gym
+from .gis import GIS # from .gis import GIS in production
+from .csm_aqua import CSM # from .csm_aqua import CSM in production
+import imp
+import gymnasium as gym
+from matplotlib import pyplot as plt
 import numpy as np
-from .dataframe import DataFrame
-from .gis import GIS
+from dataframe import DataFrame
+import math
+from dataframe import DataFrame
+import random
 import re
-from .csm import CSM
-
+import geopandas as gpd
+import contextily as cx
+   
 
 class R3(gym.Env): 
     
@@ -22,15 +29,15 @@ class R3(gym.Env):
     observation_space = gym.spaces.Box(low = 0, 
                                             high = 100,
                                             shape = (33,),
-                                            dtype = np.int)
+                                            dtype = int)
     AGENT = -1
     
     def __init__(self, stochastic=True, fitness_threshold=-1000):
-        r3_plots_path = "plots.shp"
-        r3_pipelines_path = "pipelines.shp"
+        self.r3_plots_path = "plots.shp"
+        self.r3_pipelines_path = "pipelines.shp"
         self.layers = GIS()
-        self.layers.add_data_layer(r3_plots_path, 'plots')
-        self.layers.add_data_layer(r3_pipelines_path, 'pipelines')
+        self.layers.add_data_layer('plots', self.r3_plots_path)
+        self.layers.add_data_layer('pipelines', self.r3_pipelines_path)
         self.csm = CSM()
         self.sow()
         self.fitness_threshold = fitness_threshold
@@ -38,8 +45,10 @@ class R3(gym.Env):
     def sow(self, sowing_dates_series=None):
         if sowing_dates_series is None:
             self.layers.add_random_series_column('pipelines', 'sowing_dates')
+            #self.layers.add_random_series_column('plots', 'sowing_dates')
         else:
             self.layers.add_column('pipelines', sowing_dates_series, 'sowing_dates')
+            #self.layers.add_column('plots', sowing_dates_series, 'sowing_dates')
     
     def get_state(self):
         """start_state = np.where(self.grid_state == self.AGENT)
@@ -126,17 +135,54 @@ class R3(gym.Env):
     def estimated_cluster_yield(self):
         yield_series = []
         for p in self.layers.get_column('pipelines', 'sowing_dates'):
-            self.csm.simulate_canopy_cover(p)
+            self.csm.simulate_fc(p)
             self.csm.simulate_ndvi()
             yield_series.append(self.csm.estimate_yield()/100)
         self.layers.add_column('pipelines', yield_series, 'yield')
         return sum(self.layers.get_column('pipelines', 'yield'))
     
+    def shows(self, plot=False):
+        ax = self.layers.plot(layer_name='pipelines', column4color='canal_id', alpha=0.8)
+        #self.layers.show_dataframe(layer_name='plots')
+        #self.layers.show_dataframe(layer_name='pipelines')
+        print(self.layers.get_data_layer('pipelines'))
+        if plot is True:
+            # Add numbers to the plot
+            for i, row in self.layers.get_data_layer('plots').iterrows():
+                centroid = row['geometry'].centroid
+                ax.annotate(row['area'], xy=(centroid.x, centroid.y), ha='center', va='center', fontsize=3)
+                ax.text(centroid.x, centroid.y, str(row['area']), ha='center', va='center', fontsize=3)
+                
+            self.layers.show() 
+            
     def show(self):
-        self.layers.plot(layer_name='plots', column4color='canal_id', alpha=0.8)
-        self.layers.show_data_layer(layer_name='plots')
-        self.layers.show_data_layer(layer_name='pipelines')
-        self.layers.show(layer_name='plots') 
+        self.fig, self.ax = plt.subplots(figsize=(17,17))
+        
+        # Sample GeoDataFrame with MultiLineString geometry
+        gdf = gpd.read_file(self.r3_plots_path)
+        
+        converted_gdf = gdf.to_crs(epsg=3857)
+        
+        self.ax = converted_gdf.plot(ax=self.ax, alpha=0.5, column='canal_id')
+        
+        cx.add_basemap(ax=self.ax, source=cx.providers.Esri.WorldImagery)
+        import pandas  as pd
+        series = pd.Series(np.random.randint(0, 50, converted_gdf.shape[0]))
+        converted_gdf['sowing_dates'] = series
+        
+        
+        # Add numbers to the plot
+        for _, row in converted_gdf.iterrows():
+            centroid = row['geometry'].centroid
+            #ax.text(centroid.x, centroid.y, str(row['Numbers']), ha='center', va='center', fontsize=10)
+            self.ax.annotate(row['sowing_dates'], xy=(centroid.x, centroid.y), xytext=(3, 3),
+                        textcoords='offset points', ha='center', va='center', fontsize=9, color='yellow')
+
+        # Set plot title and axis labels
+        self.ax.set_title('A spatiotemporal distribution of sowing dates')
+        
+        plt.show()
+
     
     def fitness_sowing_dates_distribution(self):
         self.verify_irrigation_network_constraints()

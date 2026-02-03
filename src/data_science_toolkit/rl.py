@@ -1,4 +1,4 @@
-import gym
+import gymnasium as gym
 import numpy as np
 
 class Environment:
@@ -10,6 +10,8 @@ class Environment:
         else:
             self.__environment = gym.make(environment_name)
         self.__status = self.reset()
+        self.observation_space = self.__environment.observation_space
+        self.action_space = self.__environment.action_space
         
         
     def describe(self):
