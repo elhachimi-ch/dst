@@ -8,10 +8,6 @@ import numpy as np
 import seaborn as sns
 from math import sqrt
 from catboost import CatBoostRegressor, CatBoostClassifier
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler, StandardScaler, RobustScaler, QuantileTransformer, MaxAbsScaler
 from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
 from sklearn.model_selection import train_test_split
@@ -19,29 +15,73 @@ import os
 import psutil
 import pyarrow.parquet as pq
 import pyarrow as pa
-from torch.utils.data import IterableDataset
 from sklearn.model_selection import StratifiedKFold, KFold
+from typing import Optional, Sequence, Dict
+from pathlib import Path
+
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    from torch.utils.data import DataLoader, TensorDataset, IterableDataset, Dataset
+    _TORCH_AVAILABLE = True
+    _TORCH_IMPORT_ERROR = None
+except Exception as _torch_exc:  # ImportError, OSError (e.g. Windows fbgemm.dll), etc.
+    _TORCH_AVAILABLE = False
+    _TORCH_IMPORT_ERROR = _torch_exc
+
+    class _CudaStub:
+        @staticmethod
+        def is_available():
+            return False
+
+    class _TorchStub:
+        cuda = _CudaStub()
+
+        @staticmethod
+        def no_grad(*args, **kwargs):
+            def _decorator(fn):
+                return fn
+
+            if args and callable(args[0]) and not kwargs:
+                return args[0]
+            return _decorator
+
+        def __getattr__(self, name):
+            raise RuntimeError(
+                f"PyTorch is not available (failed to import: {_TORCH_IMPORT_ERROR}). "
+                f"Cannot use torch.{name}. Install a working torch build or use "
+                "model_name='xgboost' / 'catboost'."
+            )
+
+    class _NnStub:
+        Module = object
+
+        def __getattr__(self, name):
+            raise RuntimeError(
+                f"PyTorch is not available (failed to import: {_TORCH_IMPORT_ERROR}). "
+                f"Cannot use torch.nn.{name}."
+            )
+
+    torch = _TorchStub()
+    nn = _NnStub()
+    F = None
+    DataLoader = TensorDataset = IterableDataset = Dataset = object
 
 try:
     from accelerate import Accelerator
     _ACCELERATE_AVAILABLE = True
 except ImportError:
     _ACCELERATE_AVAILABLE = False
-    
+
 import os
 import re
 import glob
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 import numpy as np
-import torch
-from torch.utils.data import Dataset
 import rasterio
 from rasterio.warp import reproject, Resampling
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 
 DATE_RE = re.compile(r".*_(\d{8})(?:\.\w+)?$")  # captures YYYYMMDD at end
