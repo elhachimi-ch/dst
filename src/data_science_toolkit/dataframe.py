@@ -52,6 +52,7 @@ class DataFrame:
                  sheet_name=0,
                  skip_rows=None,
                  n_workers='auto',
+                 read_n_rows=None,
                  **kwargs
                  ):
         
@@ -60,16 +61,26 @@ class DataFrame:
         self.n_workers = n_workers
         self.data_path = data_path
 
+        if data_path is not None and isinstance(data_path, str):
+            file_ext = os.path.splitext(data_path)[1].lower()
+            if data_type == 'parquet' and file_ext in ('.csv', '.txt', '.tsv'):
+                data_type = 'csv'
+            elif data_type == 'csv' and file_ext in ('.parquet', '.pq'):
+                data_type = 'parquet'
+            self.data_type = data_type
+
         if data_path is not None:
             if data_type == 'csv':
+                csv_kwargs = dict(kwargs)
+                csv_nrows = csv_kwargs.pop('nrows', read_n_rows)
                 if has_header is True:
                     self.dataframe = pd.read_csv(data_path, encoding='utf-8', delimiter=delimiter, 
                                                low_memory=False, on_bad_lines='skip', skip_blank_lines=False,
-                                               skiprows=skip_rows, **kwargs)
+                                               skiprows=skip_rows, nrows=csv_nrows, **csv_kwargs)
                 else:
                     self.dataframe = pd.read_csv(data_path, encoding='utf-8', delimiter=delimiter, 
                                                low_memory=False, on_bad_lines='skip', skip_blank_lines=False,
-                                               header=None, **kwargs)
+                                               header=None, nrows=csv_nrows, **csv_kwargs)
             elif data_type == 'json':
                 self.dataframe = pd.read_json(data_path, encoding='utf-8')
             elif data_type == 'xls':
@@ -134,6 +145,155 @@ class DataFrame:
         
     def get_generator(self):
         return self.__generator
+    
+    def load_parquet_to_in_memory_dataframe(self, columns=None, show_progress=True):
+        """
+        Load the entire Parquet dataset or file into a pandas DataFrame in memory.
+        Optionally, only load specified columns.
+        Updates self.dataframe and sets data_type to 'df'.
+
+        Args:
+            columns: Optional list of columns to load.
+            show_progress: Show tqdm progress bar while loading.
+
+        Returns:
+            pandas.DataFrame: The loaded DataFrame.
+        """
+        if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            raise ValueError("Current data is not a Parquet dataset.")
+        import pyarrow.dataset as ds
+        import pyarrow as pa
+        import pandas as pd
+        from tqdm import tqdm
+        # Use batches for progress
+        batches = list(self.dataset.to_batches(columns=columns))
+        total_rows = sum(batch.num_rows for batch in batches)
+        dfs = []
+        with tqdm(total=total_rows, desc="Loading parquet", disable=not show_progress) as pbar:
+            for batch in batches:
+                df_part = batch.to_pandas()
+                dfs.append(df_part)
+                pbar.update(len(df_part))
+        df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+        self.dataframe = df
+        self.data_type = 'df'
+        print(f"✅ Successfully loaded parquet to in-memory DataFrame with {len(df):,} rows and {len(df.columns)} columns.")
+        return df
+    
+    def merge_csv_files_from_folder(self, input_folder, join_column='date', 
+                                    pattern='*.csv', how='outer', 
+                                    verbose=True, show_progress=True):
+        """
+        Read and merge all CSV files from a folder into one DataFrame.
+        
+        Column names from each file are prefixed with the filename (without extension)
+        to prevent duplication, except for the join column which remains unchanged.
+        
+        Parameters
+        ----------
+        input_folder : str
+            Path to folder containing CSV files
+        join_column : str, default 'date'
+            Column name to use for merging all dataframes
+        pattern : str, default '*.csv'
+            Glob pattern to match CSV files
+        how : str, default 'outer'
+            Type of merge to perform ('left', 'right', 'outer', 'inner')
+        verbose : bool, default True
+            Print progress information
+        show_progress : bool, default True
+            Show tqdm progress bar
+            
+        Returns
+        -------
+        pandas.DataFrame
+            Merged dataframe with all CSV files
+            
+        Examples
+        --------
+        df_tool = DataFrame()
+        merged = df_tool.merge_csv_files_from_folder(
+            input_folder='data/time_series/',
+            join_column='date',
+            how='outer'
+        )
+        
+        Notes
+        -----
+        - Each CSV file contributes columns prefixed by its filename
+        - The join column is not prefixed and must exist in all files
+        - Missing values in non-matching rows are filled with NaN
+        """
+        from glob import glob
+        from tqdm import tqdm
+        
+        if not os.path.exists(input_folder):
+            raise ValueError(f"Input folder does not exist: {input_folder}")
+        
+        # Find all CSV files
+        csv_files = sorted(glob(os.path.join(input_folder, pattern)))
+        
+        if not csv_files:
+            raise ValueError(f"No CSV files found in {input_folder} matching pattern {pattern}")
+        
+        if verbose:
+            print(f"📁 Found {len(csv_files)} CSV file(s) in {input_folder}")
+        
+        # Read and process each CSV file
+        dataframes = []
+        file_iterator = tqdm(csv_files, desc="Reading CSV files") if show_progress else csv_files
+        
+        for csv_file in file_iterator:
+            try:
+                # Get filename without extension
+                filename = os.path.splitext(os.path.basename(csv_file))[0]
+                
+                # Read CSV
+                df = pd.read_csv(csv_file)
+                
+                if join_column not in df.columns:
+                    if verbose:
+                        print(f"⚠️  Warning: '{join_column}' not found in {filename}, skipping file")
+                    continue
+                
+                # Rename columns (except join column) with filename prefix
+                new_columns = {}
+                for col in df.columns:
+                    if col != join_column:
+                        new_columns[col] = f"{filename}_{col}"
+                
+                if new_columns:
+                    df = df.rename(columns=new_columns)
+                
+                dataframes.append(df)
+                
+                if verbose and not show_progress:
+                    print(f"   ✓ Loaded {filename}: {len(df)} rows, {len(df.columns)} columns")
+                    
+            except Exception as e:
+                if verbose:
+                    print(f"❌ Error reading {csv_file}: {e}")
+                continue
+        
+        if not dataframes:
+            raise ValueError("No valid dataframes to merge")
+        
+        # Merge all dataframes on join_column
+        if verbose:
+            print(f"🔗 Merging {len(dataframes)} dataframe(s) on '{join_column}' using '{how}' join...")
+        
+        merged_df = dataframes[0]
+        for df in dataframes[1:]:
+            merged_df = pd.merge(merged_df, df, on=join_column, how=how)
+        
+        # Update instance dataframe
+        self.dataframe = merged_df
+        self.data_type = 'df'
+        
+        if verbose:
+            print(f"✅ Successfully merged into DataFrame with {len(merged_df)} rows and {len(merged_df.columns)} columns")
+        
+        return merged_df
     
     def remove_stopwords(self, column, language_or_stopwords_list='english', in_place=True):
         if isinstance(language_or_stopwords_list, list) is True:
@@ -208,21 +368,227 @@ class DataFrame:
     def is_empty(self):
         return self.get_shape()[0] == 0
     
-    def get_columns_types(self, show=True):
+    def get_columns_data_types(self, show=True):
+        """
+        Return the data types of columns in the underlying DataFrame.
+
+        Parameters
+        ----------
+        show : bool, optional
+            If True print the result (default True).
+
+        Returns
+        -------
+        pandas.Series
+            Series indexed by column name with dtype objects.
+        """
         types = self.get_dataframe().dtypes
         if show:
             print(types)
         return types
     
-    def set_data_types(self, column_dict_types):
-        self.dataframe = self.get_dataframe().astype(column_dict_types)
+    def set_data_columns_types(self, column_dict_types):
+        """
+        Safely set data types for specified columns.
+
+        Parameters
+        ----------
+        column_dict_types : dict
+            Mapping of column name -> dtype (string or dtype object).
+
+        Notes
+        -----
+        - Columns that are not present are ignored but a warning is printed.
+        - Uses pandas astype on the in-memory DataFrame.
+        """
+        if not isinstance(column_dict_types, dict):
+            raise TypeError("column_dict_types must be a dict of {column: dtype}")
+
+        df = self.get_dataframe()
+        missing = [c for c in column_dict_types.keys() if c not in df.columns]
+        if missing:
+            print(f"Warning: these columns were not found and will be skipped: {missing}")
+
+        # Filter to existing columns only
+        to_apply = {c: t for c, t in column_dict_types.items() if c in df.columns}
+        if not to_apply:
+            return df
+
+        # Use astype with errors='ignore' to avoid raising on incompatible conversions
+        try:
+            self.dataframe = df.astype(to_apply, errors='ignore')
+        except TypeError:
+            # Fallback: apply per-column to surface which columns fail
+            for c, t in to_apply.items():
+                try:
+                    self.dataframe[c] = df[c].astype(t)
+                except Exception as e:
+                    print(f"Could not cast column '{c}' to {t}: {e}")
+        return self.get_dataframe()
         
-    def set_same_type(self, same_type='float64'):
+    def set_same_data_type_columns(self, same_type='float64'):
         """
         example of types: float64, object
         """
-        for p in self.get_columns_names():
-            self.set_column_type(p, same_type)
+        cols = self.get_columns_names()
+        if not cols:
+            return self.get_dataframe()
+
+        df = self.get_dataframe()
+        for column_name in cols:
+            try:
+                df[column_name] = df[column_name].astype(same_type)
+            except Exception as e:
+                print(f"Warning: could not cast column '{column_name}' to {same_type}: {e}")
+
+        self.dataframe = df
+        return self.get_dataframe()
+
+    def keep_numerical_columns_only(
+        self,
+        load_parquet_to_memory: bool = True,
+        show: bool = True,
+        output_parquet_path: str | None = None,
+        overwrite: bool = False,
+        exclude_columns: list[str] | None = None,
+    ):
+        """
+        Keep only numerical columns.
+
+        Supports both in-memory DataFrame and parquet mode.
+
+        Parameters
+        ----------
+        load_parquet_to_memory : bool, default True
+            - True: for parquet mode, load only numeric columns into memory and
+              switch to in-memory dataframe mode.
+            - False: for parquet mode, do not load data; return numeric column
+              names discovered from parquet schema.
+        show : bool, default True
+            Print a short summary of kept columns.
+        output_parquet_path : str, optional
+            For parquet mode, destination parquet file path (or directory path)
+            where filtered numeric data will be saved.
+        overwrite : bool, default False
+            Whether to overwrite output_parquet_path if it already exists.
+        exclude_columns : list[str], optional
+            Columns to keep even if they are not numerical.
+        excludes_columns : list[str], optional
+            Alias for exclude_columns (kept for typo compatibility).
+
+        Returns
+        -------
+        pandas.DataFrame | list[str] | dict
+            - In-memory mode: filtered pandas DataFrame.
+            - Parquet mode:
+                * if output_parquet_path is provided -> summary dict after write
+                * else if load_parquet_to_memory=True -> filtered pandas DataFrame
+                * else -> list of remaining columns
+        """
+        excluded = []
+        if exclude_columns:
+            excluded.extend(list(exclude_columns))
+        
+        excluded = list(dict.fromkeys(excluded))
+
+        # In-memory pandas path
+        if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            df = self.get_dataframe()
+            numeric_cols = list(df.select_dtypes(include=[np.number]).columns)
+            kept_excluded = [c for c in excluded if c in df.columns]
+            remaining_cols = list(dict.fromkeys(numeric_cols + kept_excluded))
+            numeric_df = df[remaining_cols]
+            self.dataframe = numeric_df
+            if show:
+                print(f"✅ Kept {len(numeric_df.columns)} numerical columns (in-memory mode).")
+                print(f"Removed {len(df.columns) - len(numeric_df.columns)} non-numerical columns.")
+                print(f"Removed columns: {[c for c in df.columns if c not in remaining_cols]}")
+                # print(f"📌 Remaining columns ({len(remaining_cols)}): {remaining_cols}")
+                
+            return self.get_dataframe()
+
+        # Parquet path
+        schema = self.dataset.schema
+
+        def _is_numeric_arrow(t: pa.DataType) -> bool:
+            return pa.types.is_integer(t) or pa.types.is_floating(t) or pa.types.is_decimal(t)
+
+        numeric_columns = [field.name for field in schema if _is_numeric_arrow(field.type)]
+        schema_names = list(schema.names)
+        kept_excluded = [c for c in excluded if c in schema_names]
+        remaining_cols = list(dict.fromkeys(numeric_columns + kept_excluded))
+
+        if show:
+            print(f"📊 Found {len(numeric_columns)} numerical columns in parquet schema.")
+            if excluded:
+                print(f"🧷 Kept excluded columns found in schema ({len(kept_excluded)}): {kept_excluded}")
+
+        if output_parquet_path is not None:
+            if os.path.exists(output_parquet_path):
+                if not overwrite:
+                    raise FileExistsError(
+                        f"Output path already exists: {output_parquet_path}. Set overwrite=True to replace it."
+                    )
+                if os.path.isdir(output_parquet_path):
+                    import shutil
+                    shutil.rmtree(output_parquet_path)
+                else:
+                    os.remove(output_parquet_path)
+
+            table = self.dataset.to_table(columns=remaining_cols)
+
+            if str(output_parquet_path).lower().endswith(".parquet"):
+                out_dir = os.path.dirname(output_parquet_path)
+                if out_dir:
+                    os.makedirs(out_dir, exist_ok=True)
+                pq.write_table(table, output_parquet_path)
+                if show:
+                    print(f"✅ Saved numeric parquet file -> {output_parquet_path}")
+            else:
+                os.makedirs(output_parquet_path, exist_ok=True)
+                ds.write_dataset(table, base_dir=output_parquet_path, format="parquet")
+                if show:
+                    print(f"✅ Saved numeric parquet dataset -> {output_parquet_path}")
+
+            if show:
+                print(f"📌 Remaining columns ({len(remaining_cols)}): {remaining_cols}")
+
+            self.data_path = output_parquet_path
+            self.data_type = 'parquet'
+            self.dataset = ds.dataset(self.data_path, format="parquet")
+            self.dataframe = pd.DataFrame()
+
+            return {
+                "output_parquet_path": output_parquet_path,
+                "remaining_columns": remaining_cols,
+                "rows": int(table.num_rows),
+                "columns": int(table.num_columns),
+            }
+
+        if not load_parquet_to_memory:
+            if show:
+                print(f"📌 Remaining columns ({len(remaining_cols)}): {remaining_cols}")
+            return remaining_cols
+
+        if not remaining_cols:
+            self.dataframe = pd.DataFrame()
+            self.data_type = 'df'
+            if show:
+                print("⚠️ No numerical columns found. Returning empty DataFrame.")
+            return self.get_dataframe()
+
+        table = self.dataset.to_table(columns=remaining_cols)
+        self.dataframe = table.to_pandas()
+        self.data_type = 'df'
+
+        if show:
+            print(
+                f"✅ Loaded numeric parquet columns into memory: "
+                f"{len(self.dataframe):,} rows, {len(self.dataframe.columns)} columns."
+            )
+            print(f"📌 Remaining columns ({len(remaining_cols)}): {remaining_cols}")
+
+        return self.get_dataframe()
 
     
     def describe(self, show=True, columns=None, sample_size=None):
@@ -296,28 +662,10 @@ class DataFrame:
         if not target_cols:
             return pd.DataFrame()
 
-        # Decide sampling strategy
-        if is_single_file:
-            try:
-                est_rows = pf.metadata.num_rows
-            except Exception:
-                est_rows = None
-        else:
-            # best effort estimate
-            try:
-                est_rows = sum(f.count_rows() for f in self.dataset.get_fragments())
-            except Exception:
-                est_rows = None
-
-        if sample_size is None:
-            if est_rows is not None and est_rows >= 500_000:
-                sample_size = min(500_000, max(1, est_rows // 10))
-            else:
-                sample_size = None  # full
-        else:
-            sample_size = int(sample_size) if sample_size is not None else None
-            if sample_size is not None and sample_size <= 0:
-                sample_size = None
+        # Normalize sample_size
+        if sample_size is not None:
+            sample_size = int(sample_size) if sample_size > 0 else None
+        # If sample_size is None, use full dataset (no sampling heuristic)
 
         stats = {}
 
@@ -1822,7 +2170,25 @@ class DataFrame:
                     return self.get_dataframe().head(nbr_of_rows)
             
     def get_column(self, column):
-        return self.get_dataframe()[column]
+        """
+        Return a column as a pandas Series (in-memory) or as a concatenated Series (parquet).
+        For parquet, loads the column from all fragments and concatenates.
+        """
+        if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            return self.get_dataframe()[column]
+        import pyarrow as pa
+        import pandas as pd
+        # Parquet path: concatenate column from all fragments
+        fragments = list(self.dataset.get_fragments())
+        col_chunks = []
+        for fragment in fragments:
+            for piece in fragment.split_by_row_group():
+                tbl = piece.to_table(columns=[column])
+                col_chunks.append(tbl[column].to_pandas())
+        if col_chunks:
+            return pd.concat(col_chunks, ignore_index=True)
+        else:
+            raise KeyError(f"Column '{column}' not found in any fragments.")
     
     def get_columns(self, columns_names_as_list):
         return self.get_dataframe()[columns_names_as_list]
@@ -2497,19 +2863,130 @@ class DataFrame:
                 y = pd.Series(y, self.get_index())
         self.dataframe[column_name] = y
         
-    def add_transformed_columns(self, dest_column_name="new_column", transformation_rule="okk*2"):
+    def add_column_from_transformed_columns(self, dest_column_name="new_column", transformation_rule="okk*2", output_path=None, *, in_place=False, overwrite=False, compression="zstd", preserve_partitions=True, row_group_size=None, show_progress=True):
+        """
+        Add a column to the DataFrame or Parquet dataset by applying a transformation rule to existing columns.
+        For in-memory pandas DataFrame, adds the column directly.
+        For Parquet, rewrites the file(s) with the new column.
+
+        Args:
+            dest_column_name: Name of the new column to add.
+            transformation_rule: String expression using column names and math functions.
+            output_path: For Parquet, where to write the new file/dataset. If None and in_place=True, overwrites source.
+            in_place: For Parquet, overwrite the source (uses temp swap).
+            overwrite: Allow overwriting output_path.
+            compression: Parquet compression codec.
+            preserve_partitions: Keep source partition folder structure (dataset mode).
+            row_group_size: Optional row-group size for output (None = write incoming RGs as-is).
+            show_progress: Show tqdm progress bars.
+        """
+        import numpy as np
+        import pandas as pd
+        from math import sqrt, exp, pow
+        import os
+        import pyarrow as pa
+        import pyarrow.dataset as ds
+        from tqdm import tqdm
+
         columns_names = self.get_columns_names()
         columns_dict = {}
-        operations = {'sqrt': sqrt, 
-         'pow': power,
-         'exp': exp,
-         }
+        operations = {'sqrt': sqrt, 'pow': pow, 'exp': exp, 'np': np, 'pd': pd}
         columns_dict.update(operations)
+
         for column_name in columns_names:
             if column_name in transformation_rule:
-                columns_dict.update({column_name: self.get_column(column_name)})
-        y_transformed = eval(transformation_rule, columns_dict)
-        self.dataframe[dest_column_name] = y_transformed
+                columns_dict[column_name] = self.get_column(column_name)
+
+        if self.data_type != "parquet" or not hasattr(self, "dataset"):
+            # In-memory pandas DataFrame
+            y_transformed = eval(transformation_rule, columns_dict)
+            self.dataframe[dest_column_name] = y_transformed
+            return self.dataframe
+
+        # Parquet path
+        is_single_file = os.path.isfile(self.data_path) and self.data_path.lower().endswith(".parquet")
+        out_path = output_path
+        if out_path is None and in_place:
+            out_path = self.data_path + ".tmp"
+        elif out_path is None:
+            raise ValueError("output_path must be specified for Parquet unless in_place=True")
+
+        if is_single_file:
+            source = self.data_path
+        else:
+            source = self.data_path
+
+        if os.path.exists(out_path):
+            if not overwrite:
+                raise FileExistsError(f"Output path {out_path} exists and overwrite is False.")
+
+        # Helper to compute new column for a table
+        def compute_new_col(tbl: pa.Table) -> pa.Array:
+            # Convert to pandas for transformation
+            pdf = tbl.to_pandas()
+            local_dict = {k: pdf[k] for k in pdf.columns if k in transformation_rule}
+            local_dict.update(operations)
+            return pa.array(eval(transformation_rule, local_dict))
+
+        total_rows = 0
+        files_written = 0
+        row_groups_written = 0
+
+        if is_single_file:
+            import pyarrow.parquet as pq
+            reader = pq.ParquetFile(source)
+            writer = None
+            for i in tqdm(range(reader.num_row_groups), desc="RowGroups", disable=not show_progress):
+                tbl = reader.read_row_group(i)
+                new_col = compute_new_col(tbl)
+                tbl = tbl.append_column(dest_column_name, new_col)
+                if writer is None:
+                    writer = pq.ParquetWriter(out_path, tbl.schema, compression=compression)
+                writer.write_table(tbl, row_group_size=row_group_size)
+                total_rows += tbl.num_rows
+                row_groups_written += 1
+            if writer:
+                writer.close()
+            files_written = 1
+        else:
+            # Dataset mode
+            fragments = list(self.dataset.get_fragments())
+            import pyarrow.parquet as pq
+            os.makedirs(out_path, exist_ok=True)
+            for fragment in tqdm(fragments, desc="Fragments", disable=not show_progress):
+                for piece in fragment.split_by_row_group():
+                    tbl = piece.to_table()
+                    new_col = compute_new_col(tbl)
+                    tbl = tbl.append_column(dest_column_name, new_col)
+                    file_name = os.path.basename(piece.path)
+                    file_out = os.path.join(out_path, file_name)
+                    pq.write_table(tbl, file_out, compression=compression, row_group_size=row_group_size)
+                    total_rows += tbl.num_rows
+                    files_written += 1
+                    row_groups_written += 1
+
+        # In-place swap if needed
+        if in_place and output_path is None:
+            if is_single_file:
+                os.replace(out_path, self.data_path)
+            else:
+                import shutil
+                shutil.rmtree(self.data_path)
+                shutil.move(out_path, self.data_path)
+            # Refresh dataset handle
+            self.dataset = ds.dataset(self.data_path, format="parquet")
+
+        print(f"✅ add_column_from_transformed_columns complete | Files: {files_written} | Rows: {total_rows:,}")
+        return {
+            "mode": "parquet",
+            "output_path": out_path,
+            "files_written": files_written,
+            "rows": total_rows,
+            "row_groups_written": row_groups_written,
+            "added_column": dest_column_name,
+            "compression": compression,
+            "preserve_partitions": preserve_partitions,
+        }
         
     def add_one_value_column(self, column_name, value, length=None):
         if length is not None:
@@ -2744,8 +3221,13 @@ class DataFrame:
             self.rename_columns({'index': column_name})
         
     def drop_columns(self, columns_names_as_list):
+        existing_columns = set(self.dataframe.columns)
         for p in columns_names_as_list:
+            if p not in existing_columns:
+                print(f"⚠️ Column '{p}' not found. Skipped.")
+                continue
             self.dataframe = self.dataframe.drop(p, axis=1)
+            existing_columns.remove(p)
         return self.dataframe
     
     def reorder_columns(self, new_order_as_list):
@@ -2757,6 +3239,85 @@ class DataFrame:
             if p not in columns_names_as_list:
                 self.dataframe = self.dataframe.drop(p, axis=1)
         return self.dataframe
+    
+    def pivot_repeated_rows_to_columns(
+        self,
+        id_column_name: str,
+        cols_to_expand: list[str] | None = None,
+        exclude_columns: list[str] | None = None,
+        order_by: str | None = None,
+        start_index: int = 1
+    ):
+        """
+        Convert repeated rows per ID into a wide DataFrame and store it in ``self.dataframe``.
+
+        Each repeated record for the same ``id_column_name`` becomes a new set of
+        suffixed columns like ``column_1``, ``column_2``, etc.
+
+        Args:
+            id_column_name: Column used to identify repeated groups (for example, ``ID``).
+            cols_to_expand: Columns to pivot to wide format. If ``None``, all columns except
+                ``id_column_name`` and ``exclude_columns`` are expanded.
+            exclude_columns: Columns to keep once per ID (not suffixed) and append at the
+                end of the wide output.
+            order_by: Optional column used to order rows within each ID before assigning suffixes.
+            start_index: First suffix index (default ``1`` gives ``_1``, ``_2``, ...).
+
+        Returns:
+            pandas.DataFrame: The wide DataFrame (also assigned to ``self.dataframe``).
+
+        Raises:
+            ValueError: If required columns are missing, or neither expansion nor kept columns
+                remain after filtering.
+        """
+        df = self.dataframe.copy()
+
+        if id_column_name not in df.columns:
+            raise ValueError(f"Column '{id_column_name}' not found in dataframe.")
+
+        if order_by is not None and order_by not in df.columns:
+            raise ValueError(f"Column '{order_by}' not found in dataframe.")
+
+        excluded_requested = [
+            c for c in (exclude_columns or []) if c in df.columns and c != id_column_name
+        ]
+        excluded = set(excluded_requested)
+        excluded.add(id_column_name)
+    
+        if order_by is not None:
+            df = df.sort_values([id_column_name, order_by])
+    
+        if cols_to_expand is None:
+            cols_to_expand = [c for c in df.columns if c not in excluded]
+        else:
+            cols_to_expand = [c for c in cols_to_expand if c not in excluded]
+
+        if not cols_to_expand and not excluded_requested:
+            raise ValueError("No columns to expand or keep after applying filters.")
+
+        # Keep excluded columns only once per ID (first non-null value in each group).
+        keep_df = None
+        if excluded_requested:
+            keep_df = df.groupby(id_column_name, as_index=False)[excluded_requested].first()
+    
+        if cols_to_expand:
+            rep_col = "__rep_idx__"
+            df[rep_col] = df.groupby(id_column_name).cumcount() + start_index
+            wide = df.set_index([id_column_name, rep_col])[cols_to_expand].unstack(rep_col)
+            wide.columns = [f"{col}_{idx}" for col, idx in wide.columns]
+            wide = wide.reset_index()
+        else:
+            wide = df[[id_column_name]].drop_duplicates().reset_index(drop=True)
+
+        if keep_df is not None:
+            wide = wide.merge(keep_df, on=id_column_name, how="left")
+
+        # Ensure excluded columns are at the end and appear only once.
+        if excluded_requested:
+            main_cols = [c for c in wide.columns if c not in excluded_requested]
+            wide = wide[main_cols + excluded_requested]
+
+        self.dataframe = wide
     
     
     def keep_columns_parquet(
@@ -4736,8 +5297,104 @@ class DataFrame:
         else:
             return self.get_column(column).apply(func)
         
-    def add_column_based_on_function(self, column_name, func_accepting_row):
-        self.add_column(column_name, self.get_dataframe().apply(func_accepting_row, axis=1))
+    def add_column_based_on_function(self, column_name, func_accepting_row, output_path=None, *, in_place=True, overwrite=False, compression="zstd", preserve_partitions=True, row_group_size=None, show_progress=True):
+        """
+        Add a column to the DataFrame or Parquet dataset by applying a function to each row.
+        For in-memory pandas DataFrame, adds the column directly.
+        For Parquet, rewrites the file(s) with the new column.
+
+        Args:
+            column_name: Name of the new column to add.
+            func_accepting_row: Function to apply to each row (expects a pandas Series or dict).
+            output_path: For Parquet, where to write the new file/dataset. If None and in_place=True, overwrites source.
+            in_place: For Parquet, overwrite the source (uses temp swap).
+            overwrite: Allow overwriting output_path.
+            compression: Parquet compression codec.
+            preserve_partitions: Keep source partition folder structure (dataset mode).
+            row_group_size: Optional row-group size for output (None = write incoming RGs as-is).
+            show_progress: Show tqdm progress bars.
+        """
+        if self.data_type != "parquet" or not hasattr(self, "dataset"):
+            self.add_column(column_name, self.get_dataframe().apply(func_accepting_row, axis=1))
+            return self.get_dataframe()
+
+        import os
+        import pyarrow as pa
+        import pyarrow.dataset as ds
+        import pyarrow.parquet as pq
+        import pandas as pd
+        from tqdm import tqdm
+
+        is_single_file = os.path.isfile(self.data_path) and self.data_path.lower().endswith(".parquet")
+        out_path = output_path
+        if out_path is None and in_place:
+            out_path = self.data_path + ".tmp"
+        elif out_path is None:
+            raise ValueError("output_path must be specified for Parquet unless in_place=True")
+
+        if os.path.exists(out_path):
+            if not overwrite:
+                raise FileExistsError(f"Output path {out_path} exists and overwrite is False.")
+
+        def compute_new_col(tbl: pa.Table) -> pa.Array:
+            pdf = tbl.to_pandas()
+            return pa.array(pdf.apply(func_accepting_row, axis=1))
+
+        files_written = 0
+        row_groups_written = 0
+        total_rows = 0
+
+        if is_single_file:
+            reader = pq.ParquetFile(self.data_path)
+            writer = None
+            for i in tqdm(range(reader.num_row_groups), desc="RowGroups", disable=not show_progress):
+                tbl = reader.read_row_group(i)
+                new_col = compute_new_col(tbl)
+                tbl = tbl.append_column(column_name, new_col)
+                if writer is None:
+                    writer = pq.ParquetWriter(out_path, tbl.schema, compression=compression)
+                writer.write_table(tbl, row_group_size=row_group_size)
+                total_rows += tbl.num_rows
+                row_groups_written += 1
+            if writer:
+                writer.close()
+            files_written = 1
+        else:
+            fragments = list(self.dataset.get_fragments())
+            os.makedirs(out_path, exist_ok=True)
+            for fragment in tqdm(fragments, desc="Fragments", disable=not show_progress):
+                for piece in fragment.split_by_row_group():
+                    tbl = piece.to_table()
+                    new_col = compute_new_col(tbl)
+                    tbl = tbl.append_column(column_name, new_col)
+                    file_name = os.path.basename(piece.path)
+                    file_out = os.path.join(out_path, file_name)
+                    pq.write_table(tbl, file_out, compression=compression, row_group_size=row_group_size)
+                    total_rows += tbl.num_rows
+                    files_written += 1
+                    row_groups_written += 1
+
+        # In-place swap if needed
+        if in_place and output_path is None:
+            if is_single_file:
+                os.replace(out_path, self.data_path)
+            else:
+                import shutil
+                shutil.rmtree(self.data_path)
+                shutil.move(out_path, self.data_path)
+            self.dataset = ds.dataset(self.data_path, format="parquet")
+
+        print(f"✅ add_column_based_on_function complete | Files: {files_written} | Rows: {total_rows:,}")
+        return {
+            "mode": "parquet",
+            "output_path": out_path,
+            "files_written": files_written,
+            "rows": total_rows,
+            "row_groups_written": row_groups_written,
+            "added_column": column_name,
+            "compression": compression,
+            "preserve_partitions": preserve_partitions,
+        }
         
     def convert_column_type(self, column_name, new_type='float64'):
         """Convert the type of the column
@@ -4765,13 +5422,1141 @@ class DataFrame:
     def append_dataframe(self, dataframe):
         # append dataset contents data_sets must have the same columns names
         self.dataframe = pd.concat([self.dataframe, dataframe], ignore_index=True)
-        
-    def join(self, dataframe, on_column='index', how='inner'):
-        if on_column == 'index':
-           self.dataframe = pd.merge(self.get_dataframe(), dataframe, left_index=True, right_index=True, how=how)
+
+    # ------------------------------------------------------------------ #
+    # Parquet join helpers (pyarrow / DuckDB)                              #
+    # ------------------------------------------------------------------ #
+
+    PYARROW_JOIN_PROBE_MAX_ROWS = 30_000_000
+
+    @staticmethod
+    def _parquet_read_glob(path: str) -> str:
+        path = os.path.abspath(path)
+        if os.path.isdir(path):
+            return os.path.join(path, "**", "*.parquet").replace("\\", "/")
+        return path.replace("\\", "/")
+
+    @staticmethod
+    def _parquet_row_count_at_path(path: str) -> int | None:
+        try:
+            path = os.path.abspath(path)
+            if os.path.isdir(path):
+                total = 0
+                for root, _, files in os.walk(path):
+                    for fname in files:
+                        if fname.lower().endswith(".parquet"):
+                            total += pq.ParquetFile(os.path.join(root, fname)).metadata.num_rows
+                return total
+            return pq.ParquetFile(path).metadata.num_rows
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_single_parquet_file(path: str) -> bool:
+        return os.path.isfile(path) and str(path).lower().endswith(".parquet")
+
+    @staticmethod
+    def _duckdb_parquet_join_sql(
+        left_sql: str, right_sql: str, how_sql: str, using_cols: str
+    ) -> str:
+        return f"""
+            SELECT * FROM {left_sql}
+            {how_sql} JOIN {right_sql}
+            USING ({using_cols})
+        """
+
+    @staticmethod
+    def _merge_parquet_files(part_paths: list[str], output_path: str) -> int:
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        writer = None
+        total_rows = 0
+        for part_path in part_paths:
+            if not os.path.isfile(part_path):
+                continue
+            pf = pq.ParquetFile(part_path)
+            for batch in pf.iter_batches():
+                table = pa.Table.from_batches([batch])
+                if writer is None:
+                    writer = pq.ParquetWriter(output_path, table.schema)
+                writer.write_table(table)
+                total_rows += table.num_rows
+        if writer is not None:
+            writer.close()
+        return total_rows
+
+    @staticmethod
+    def _iter_parquet_row_range(
+        data_path: str,
+        start_row: int,
+        end_row: int,
+        batch_size: int = 500_000,
+    ):
+        if start_row >= end_row:
+            return
+
+        pf = pq.ParquetFile(data_path)
+        cumulative = 0
+        for rg in range(pf.num_row_groups):
+            rg_rows = pf.metadata.row_group(rg).num_rows
+            rg_start_global = cumulative
+            rg_end_global = cumulative + rg_rows
+            cumulative = rg_end_global
+
+            if rg_end_global <= start_row:
+                continue
+            if rg_start_global >= end_row:
+                break
+
+            rg_local_start = start_row - rg_start_global
+            rg_local_end = min(rg_rows, end_row - rg_start_global)
+            rg_offset = 0
+
+            for batch in pf.iter_batches(batch_size=batch_size, row_groups=[rg]):
+                batch_start_in_rg = rg_offset
+                batch_end_in_rg = rg_offset + batch.num_rows
+                rg_offset = batch_end_in_rg
+
+                istart = max(rg_local_start, batch_start_in_rg)
+                iend = min(rg_local_end, batch_end_in_rg)
+                if istart >= iend:
+                    continue
+
+                df = batch.to_pandas()
+                slice_start = istart - batch_start_in_rg
+                slice_end = iend - batch_start_in_rg
+                if slice_start > 0 or slice_end < len(df):
+                    df = df.iloc[slice_start:slice_end].copy()
+                if not df.empty:
+                    yield df
+
+    @staticmethod
+    def _iter_parquet_file_chunks(
+        data_path: str,
+        batch_size: int = 500_000,
+        columns: list[str] | None = None,
+    ):
+        """Yield pandas chunks from a parquet file or dataset directory."""
+        data_path = os.path.abspath(data_path)
+        if DataFrame._is_single_parquet_file(data_path):
+            pf = pq.ParquetFile(data_path)
+            read_columns = columns or list(pf.schema_arrow.names)
+            for batch in pf.iter_batches(batch_size=batch_size, columns=read_columns):
+                df = batch.to_pandas()
+                if not df.empty:
+                    yield df
+            return
+
+        dataset = ds.dataset(data_path, format="parquet")
+        read_columns = columns or list(dataset.schema.names)
+        scanner = dataset.scanner(columns=read_columns, batch_size=batch_size)
+        for batch in scanner.to_batches():
+            df = batch.to_pandas()
+            if not df.empty:
+                yield df
+
+    def _read_parquet_to_dataframe(
+        self,
+        data_path: str,
+        columns: list[str] | None = None,
+        show_progress: bool = True,
+        desc: str = "Load parquet",
+    ) -> pd.DataFrame:
+        """Load a parquet file or dataset into a pandas DataFrame with tqdm."""
+        total_rows = self._parquet_row_count_at_path(data_path) or 0
+        pbar = tqdm(
+            total=total_rows,
+            desc=desc,
+            unit="row",
+            unit_scale=True,
+            disable=not show_progress or total_rows == 0,
+        )
+        parts = []
+        for chunk in self._iter_parquet_file_chunks(data_path, columns=columns):
+            parts.append(chunk)
+            pbar.update(len(chunk))
+        pbar.close()
+        if not parts:
+            return pd.DataFrame()
+        return pd.concat(parts, ignore_index=True)
+
+    @staticmethod
+    def _apply_join_key_precision(
+        df: pd.DataFrame,
+        join_keys: list[str],
+        precision: int | None,
+    ) -> pd.DataFrame:
+        if precision is None:
+            return df
+        out = df
+        for key in join_keys:
+            if key not in out.columns:
+                continue
+            if pd.api.types.is_numeric_dtype(out[key]):
+                rounded = out[key].round(precision)
+                if not rounded.equals(out[key]):
+                    if out is df:
+                        out = df.copy()
+                    out[key] = rounded
+        return out
+
+    @staticmethod
+    def _duckdb_parquet_subquery(
+        path_glob: str, alias: str, join_keys: list[str], precision: int | None
+    ) -> str:
+        escaped = path_glob.replace("'", "''")
+        if precision is None:
+            return f"read_parquet('{escaped}') AS {alias}"
+        replace_parts = ", ".join(
+            f'round("{k}", {precision}) AS "{k}"' for k in join_keys
+        )
+        return (
+            f"(SELECT * REPLACE ({replace_parts}) "
+            f"FROM read_parquet('{escaped}')) AS {alias}"
+        )
+
+    @staticmethod
+    def _write_join_chunk_to_parquet(
+        df: pd.DataFrame,
+        output_path: str,
+        writer,
+    ):
+        table = pa.Table.from_pandas(df, preserve_index=False)
+        if writer["handle"] is None:
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            writer["handle"] = pq.ParquetWriter(output_path, table.schema)
+        writer["handle"].write_table(table)
+        return len(df)
+
+    def _streaming_pyarrow_parquet_join(
+        self,
+        left_path: str,
+        right_path: str,
+        join_keys: list[str],
+        how: str,
+        output_path: str,
+        show_progress: bool = True,
+        batch_size: int = 500_000,
+        join_key_precision: int | None = 6,
+    ) -> int:
+        """Join parquet files by loading the smaller side and streaming the larger."""
+        left_rows = self._parquet_row_count_at_path(left_path) or 0
+        right_rows = self._parquet_row_count_at_path(right_path) or 0
+        probe_rows = min(left_rows, right_rows)
+
+        if probe_rows > self.PYARROW_JOIN_PROBE_MAX_ROWS:
+            raise ValueError(
+                f"pyarrow backend: smaller join side has {probe_rows:,} rows "
+                f"(max {self.PYARROW_JOIN_PROBE_MAX_ROWS:,}). Use backend='duckdb'."
+            )
+
+        if right_rows <= left_rows:
+            probe_df = self._read_parquet_to_dataframe(
+                right_path, show_progress=show_progress, desc="Load right (probe)"
+            )
+            stream_path = left_path
+            stream_rows = left_rows
+            probe_on_left = False
         else:
-            self.dataframe = pd.merge(self.dataframe, dataframe, on=on_column, how=how)
-            
+            probe_df = self._read_parquet_to_dataframe(
+                left_path, show_progress=show_progress, desc="Load left (probe)"
+            )
+            stream_path = right_path
+            stream_rows = right_rows
+            probe_on_left = True
+
+        probe_df = self._apply_join_key_precision(probe_df, join_keys, join_key_precision)
+
+        pbar = tqdm(
+            total=stream_rows,
+            desc="Join (pyarrow)",
+            unit="row",
+            unit_scale=True,
+            disable=not show_progress or stream_rows == 0,
+        )
+        writer = {"handle": None}
+        total_written = 0
+        try:
+            for chunk in self._iter_parquet_file_chunks(stream_path, batch_size=batch_size):
+                chunk = self._apply_join_key_precision(chunk, join_keys, join_key_precision)
+                if probe_on_left:
+                    merged = pd.merge(probe_df, chunk, on=join_keys, how=how)
+                else:
+                    merged = pd.merge(chunk, probe_df, on=join_keys, how=how)
+                if not merged.empty:
+                    total_written += self._write_join_chunk_to_parquet(
+                        merged, output_path, writer
+                    )
+                pbar.update(len(chunk))
+        finally:
+            if writer["handle"] is not None:
+                writer["handle"].close()
+            pbar.close()
+
+        if total_written == 0:
+            print(
+                f"⚠️ Join produced 0 rows (how={how}, on={join_keys}). "
+                f"Check key alignment or try join_key_precision=6 and how='left'."
+            )
+        return total_written
+
+    def _parallel_pyarrow_parquet_join(
+        self,
+        left_path: str,
+        right_path: str,
+        join_keys: list[str],
+        how: str,
+        output_path: str,
+        n_jobs: int,
+        max_concurrent_workers: int | None = None,
+        verbose: bool = False,
+        show_progress: bool = True,
+        batch_size: int = 500_000,
+        join_key_precision: int | None = 6,
+    ) -> int:
+        """Parallel pyarrow join when the right table is the in-memory probe."""
+        import concurrent.futures
+        import math
+        import threading
+
+        left_path = os.path.abspath(left_path)
+        right_path = os.path.abspath(right_path)
+        output_path = os.path.abspath(output_path)
+
+        right_rows = self._parquet_row_count_at_path(right_path) or 0
+        left_rows = self._parquet_row_count_at_path(left_path) or 0
+        if right_rows > left_rows:
+            raise ValueError(
+                "Parallel pyarrow join requires the right table to be the smaller probe side. "
+                "Use n_jobs=1 or backend='duckdb'."
+            )
+        if right_rows > self.PYARROW_JOIN_PROBE_MAX_ROWS:
+            raise ValueError(
+                f"pyarrow backend: right probe has {right_rows:,} rows "
+                f"(max {self.PYARROW_JOIN_PROBE_MAX_ROWS:,}). Use backend='duckdb'."
+            )
+        if not self._is_single_parquet_file(left_path):
+            raise ValueError(
+                "Parallel pyarrow join requires a single-file parquet left table."
+            )
+
+        probe_df = self._read_parquet_to_dataframe(
+            right_path, show_progress=show_progress, desc="Load right (probe)"
+        )
+        probe_df = self._apply_join_key_precision(probe_df, join_keys, join_key_precision)
+
+        n_jobs = max(1, int(n_jobs))
+        if max_concurrent_workers is None:
+            max_concurrent_workers = min(n_jobs, 8)
+        max_concurrent_workers = max(1, int(max_concurrent_workers))
+
+        part_dir = f"{os.path.splitext(output_path)[0]}_parts"
+        os.makedirs(part_dir, exist_ok=True)
+
+        part_size = math.ceil(left_rows / n_jobs)
+        ranges = []
+        part_paths = []
+        for job_id in range(n_jobs):
+            start_row = job_id * part_size
+            end_row = min((job_id + 1) * part_size, left_rows)
+            if start_row >= end_row:
+                break
+            ranges.append((job_id, start_row, end_row))
+            part_paths.append(os.path.join(part_dir, f"part_{job_id:04d}.parquet"))
+
+        progress_lock = threading.Lock()
+        n_ranges = len(ranges)
+        pbar = tqdm(
+            total=left_rows,
+            desc="Join (pyarrow)",
+            unit="row",
+            unit_scale=True,
+            disable=not show_progress,
+        )
+        print(
+            f"parallel_join (pyarrow): {n_ranges} partition(s), "
+            f"{max_concurrent_workers} concurrent worker(s), "
+            f"{left_rows:,} left rows"
+        )
+
+        def _worker(job_id: int, start_row: int, end_row: int, part_path: str) -> int:
+            if verbose:
+                print(
+                    f"  Join {job_id + 1}/{n_ranges} started: "
+                    f"left rows {start_row:,}–{end_row:,}"
+                )
+            if os.path.exists(part_path):
+                os.remove(part_path)
+
+            writer = {"handle": None}
+            rows_read = 0
+            rows_written = 0
+            for chunk in self._iter_parquet_row_range(
+                left_path, start_row, end_row, batch_size
+            ):
+                chunk = self._apply_join_key_precision(chunk, join_keys, join_key_precision)
+                merged = pd.merge(chunk, probe_df, on=join_keys, how=how)
+                if not merged.empty:
+                    rows_written += self._write_join_chunk_to_parquet(
+                        merged, part_path, writer
+                    )
+                rows_read += len(chunk)
+                with progress_lock:
+                    pbar.update(len(chunk))
+            if writer["handle"] is not None:
+                writer["handle"].close()
+
+            if verbose:
+                print(
+                    f"  Join {job_id + 1}/{n_ranges} done → "
+                    f"{os.path.basename(part_path)} ({rows_written:,} written)"
+                )
+            return rows_written
+
+        written_parts = []
+        errors = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_workers) as executor:
+            futures = {
+                executor.submit(_worker, job_id, start_row, end_row, part_paths[job_id]): job_id
+                for job_id, start_row, end_row in ranges
+            }
+            for future in concurrent.futures.as_completed(futures):
+                job_id = futures[future]
+                try:
+                    rows = future.result()
+                    written_parts.append((job_id, part_paths[job_id], rows))
+                except Exception as exc:
+                    errors.append((job_id, exc))
+
+        pbar.close()
+        if errors:
+            for job_id, exc in errors:
+                print(f"❌ parallel_join (pyarrow) worker {job_id} failed: {exc}")
+            raise RuntimeError(f"parallel_join (pyarrow) failed for {len(errors)} worker(s)")
+
+        written_parts.sort(key=lambda x: x[0])
+        merge_paths = [p for _, p, _ in written_parts if os.path.isfile(p)]
+        total_written = self._merge_parquet_files(merge_paths, output_path)
+
+        for p in merge_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            if os.path.isdir(part_dir) and not os.listdir(part_dir):
+                os.rmdir(part_dir)
+        except OSError:
+            pass
+
+        print(
+            f"parallel_join (pyarrow): merged {len(merge_paths)} part(s) → {output_path} "
+            f"({total_written:,} rows)"
+        )
+        return total_written
+
+    def _streaming_duckdb_parquet_join(
+        self,
+        left_path: str,
+        right_path: str,
+        join_keys: list[str],
+        how: str,
+        output_path: str,
+        show_progress: bool = True,
+        batch_size: int = 500_000,
+        join_key_precision: int | None = 6,
+    ) -> int:
+        """Stream the left parquet table and join each chunk with DuckDB + tqdm."""
+        import duckdb
+
+        left_path = os.path.abspath(left_path)
+        right_path = os.path.abspath(right_path)
+        output_path = os.path.abspath(output_path)
+        right_glob = self._parquet_read_glob(right_path)
+        right_sql = self._duckdb_parquet_subquery(
+            right_glob, "r", join_keys, join_key_precision
+        )
+
+        how_sql = how.upper() if how else "INNER"
+        if how_sql not in ("INNER", "LEFT", "RIGHT", "FULL"):
+            how_sql = "INNER"
+        using_cols = ", ".join(f'"{k}"' for k in join_keys)
+
+        total_left_rows = self._parquet_row_count_at_path(left_path) or 0
+        pbar = tqdm(
+            total=total_left_rows,
+            desc="Join (duckdb)",
+            unit="row",
+            unit_scale=True,
+            disable=not show_progress or total_left_rows == 0,
+        )
+        writer = {"handle": None}
+        total_written = 0
+        try:
+            for chunk in self._iter_parquet_file_chunks(left_path, batch_size=batch_size):
+                chunk = self._apply_join_key_precision(chunk, join_keys, join_key_precision)
+                con = duckdb.connect()
+                try:
+                    con.register("left_df", chunk)
+                    sql = self._duckdb_parquet_join_sql(
+                        "left_df AS l", right_sql, how_sql, using_cols
+                    )
+                    result = con.execute(sql).fetchdf()
+                finally:
+                    con.close()
+
+                if not result.empty:
+                    total_written += self._write_join_chunk_to_parquet(
+                        result, output_path, writer
+                    )
+                pbar.update(len(chunk))
+        finally:
+            if writer["handle"] is not None:
+                writer["handle"].close()
+            pbar.close()
+
+        if total_written == 0:
+            print(
+                f"⚠️ Join produced 0 rows (how={how}, on={join_keys}). "
+                f"Check key alignment or try join_key_precision=6 and how='left'."
+            )
+        return total_written
+
+    def _resolve_join_partner(self, partner):
+        """Return ``('parquet', path)`` or ``('pandas', DataFrame)``."""
+        if isinstance(partner, DataFrame):
+            if partner.data_type == "parquet" and getattr(partner, "data_path", None):
+                return "parquet", os.path.abspath(partner.data_path)
+            return "pandas", partner.get_dataframe()
+
+        if isinstance(partner, str):
+            path = os.path.abspath(partner)
+            if os.path.isfile(path) or os.path.isdir(path):
+                return "parquet", path
+            raise FileNotFoundError(f"Join path not found: {partner}")
+
+        if isinstance(partner, pd.DataFrame):
+            if (
+                partner.empty
+                and self.data_type == "parquet"
+                and hasattr(self, "dataset")
+            ):
+                raise ValueError(
+                    "Right side is an empty DataFrame. For parquet-backed data, pass "
+                    "another DataFrame wrapper (e.g. data_dem) or a parquet path, "
+                    "not .dataframe."
+                )
+            return "pandas", partner
+
+        raise TypeError(
+            "join() expects a DataFrame wrapper, pandas DataFrame, or parquet path"
+        )
+
+    def _duckdb_join_to_parquet(
+        self,
+        left_sql: str,
+        right_sql: str,
+        join_keys: list[str],
+        how: str,
+        output_path: str,
+    ) -> int:
+        import duckdb
+
+        how_sql = how.upper() if how else "INNER"
+        if how_sql not in ("INNER", "LEFT", "RIGHT", "FULL"):
+            how_sql = "INNER"
+        using_cols = ", ".join(f'"{k}"' for k in join_keys)
+        sql = self._duckdb_parquet_join_sql(left_sql, right_sql, how_sql, using_cols)
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+        con = duckdb.connect()
+        try:
+            out = os.path.abspath(output_path).replace("\\", "/")
+            con.execute(f"COPY ({sql}) TO '{out}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+        return self._parquet_row_count_at_path(output_path) or 0
+
+    def _parallel_parquet_duckdb_join(
+        self,
+        left_path: str,
+        right_path: str,
+        join_keys: list[str],
+        how: str,
+        output_path: str,
+        n_jobs: int,
+        max_concurrent_workers: int | None = None,
+        verbose: bool = False,
+        show_progress: bool = True,
+        batch_size: int = 500_000,
+        join_key_precision: int | None = 6,
+    ) -> int:
+        import concurrent.futures
+        import math
+        import threading
+
+        import duckdb
+
+        n_jobs = max(1, int(n_jobs))
+        if max_concurrent_workers is None:
+            max_concurrent_workers = min(n_jobs, 8)
+        max_concurrent_workers = max(1, int(max_concurrent_workers))
+
+        left_path = os.path.abspath(left_path)
+        right_path = os.path.abspath(right_path)
+        output_path = os.path.abspath(output_path)
+        right_glob = self._parquet_read_glob(right_path)
+        right_sql = self._duckdb_parquet_subquery(
+            right_glob, "r", join_keys, join_key_precision
+        )
+
+        how_sql = how.upper() if how else "INNER"
+        if how_sql not in ("INNER", "LEFT", "RIGHT", "FULL"):
+            how_sql = "INNER"
+        using_cols = ", ".join(f'"{k}"' for k in join_keys)
+
+        total_left_rows = self._parquet_row_count_at_path(left_path)
+        if total_left_rows is None or total_left_rows == 0:
+            raise ValueError(f"Cannot join from empty left parquet: {left_path}")
+
+        if n_jobs == 1:
+            if show_progress:
+                return self._streaming_duckdb_parquet_join(
+                    left_path, right_path, join_keys, how, output_path,
+                    show_progress=show_progress, batch_size=batch_size,
+                    join_key_precision=join_key_precision,
+                )
+            left_glob = self._parquet_read_glob(left_path)
+            left_sql = self._duckdb_parquet_subquery(
+                left_glob, "l", join_keys, join_key_precision
+            )
+            return self._duckdb_join_to_parquet(
+                left_sql, right_sql, join_keys, how, output_path
+            )
+
+        part_dir = f"{os.path.splitext(output_path)[0]}_parts"
+        os.makedirs(part_dir, exist_ok=True)
+
+        part_size = math.ceil(total_left_rows / n_jobs)
+        ranges = []
+        part_paths = []
+        for job_id in range(n_jobs):
+            start_row = job_id * part_size
+            end_row = min((job_id + 1) * part_size, total_left_rows)
+            if start_row >= end_row:
+                break
+            ranges.append((job_id, start_row, end_row))
+            part_paths.append(os.path.join(part_dir, f"part_{job_id:04d}.parquet"))
+
+        progress_lock = threading.Lock()
+        n_ranges = len(ranges)
+        pbar = tqdm(
+            total=total_left_rows,
+            desc="Join (duckdb)",
+            unit="row",
+            unit_scale=True,
+            disable=not show_progress,
+        )
+        print(
+            f"parallel_join: {n_ranges} partition(s), "
+            f"{max_concurrent_workers} concurrent worker(s), "
+            f"{total_left_rows:,} left rows"
+        )
+
+        def _worker(job_id: int, start_row: int, end_row: int, part_path: str) -> int:
+            if verbose:
+                print(
+                    f"  Join {job_id + 1}/{n_ranges} started: "
+                    f"left rows {start_row:,}–{end_row:,}"
+                )
+
+            temp_left = os.path.join(part_dir, f"left_{job_id:04d}.parquet")
+            for p in (temp_left, part_path):
+                if os.path.exists(p):
+                    os.remove(p)
+
+            writer = None
+            rows_buffered = 0
+            for df in self._iter_parquet_row_range(left_path, start_row, end_row, batch_size):
+                df = self._apply_join_key_precision(df, join_keys, join_key_precision)
+                table = pa.Table.from_pandas(df, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(temp_left, table.schema)
+                writer.write_table(table)
+                rows_buffered += len(df)
+                with progress_lock:
+                    pbar.update(len(df))
+            if writer is not None:
+                writer.close()
+
+            if rows_buffered == 0:
+                try:
+                    os.remove(temp_left)
+                except OSError:
+                    pass
+                return 0
+
+            temp_left_glob = temp_left.replace("\\", "/").replace("'", "''")
+            left_sql = f"read_parquet('{temp_left_glob}') AS l"
+            sql = self._duckdb_parquet_join_sql(left_sql, right_sql, how_sql, using_cols)
+
+            con = duckdb.connect()
+            try:
+                out = part_path.replace("\\", "/")
+                con.execute(f"COPY ({sql}) TO '{out}' (FORMAT PARQUET)")
+            finally:
+                con.close()
+                try:
+                    os.remove(temp_left)
+                except OSError:
+                    pass
+
+            rows_written = self._parquet_row_count_at_path(part_path) or 0
+            if verbose:
+                print(
+                    f"  Join {job_id + 1}/{n_ranges} done → "
+                    f"{os.path.basename(part_path)} ({rows_written:,} rows)"
+                )
+            return rows_written
+
+        written_parts = []
+        errors = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_workers) as executor:
+            futures = {
+                executor.submit(_worker, job_id, start_row, end_row, part_paths[job_id]): job_id
+                for job_id, start_row, end_row in ranges
+            }
+            for future in concurrent.futures.as_completed(futures):
+                job_id = futures[future]
+                try:
+                    rows = future.result()
+                    written_parts.append((job_id, part_paths[job_id], rows))
+                except Exception as exc:
+                    errors.append((job_id, exc))
+
+        pbar.close()
+
+        if errors:
+            for job_id, exc in errors:
+                print(f"❌ parallel_join worker {job_id} failed: {exc}")
+            raise RuntimeError(f"parallel_join failed for {len(errors)} worker(s)")
+
+        written_parts.sort(key=lambda x: x[0])
+        merge_paths = [p for _, p, _ in written_parts if os.path.isfile(p)]
+        total_written = self._merge_parquet_files(merge_paths, output_path)
+
+        for p in merge_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            if os.path.isdir(part_dir) and not os.listdir(part_dir):
+                os.rmdir(part_dir)
+        except OSError:
+            pass
+
+        print(
+            f"parallel_join: merged {len(merge_paths)} part(s) → {output_path} "
+            f"({total_written:,} rows)"
+        )
+        return total_written
+
+    def _finalize_parquet_join(
+        self,
+        output_path: str,
+        total_rows: int,
+        how: str,
+        join_keys: list[str],
+        backend: str = "pyarrow",
+    ) -> dict:
+        output_path = os.path.abspath(output_path)
+        if not os.path.isfile(output_path):
+            raise ValueError(
+                f"Join produced no output parquet file ({total_rows:,} rows matched). "
+                f"Keys={join_keys}, how={how}. "
+                f"Try join_key_precision=6, verify lon/lat columns exist on both sides, "
+                f"or use how='left'."
+            )
+
+        self.data_path = output_path
+        self.data_type = "parquet"
+        self.dataset = ds.dataset(self.data_path, format="parquet")
+        self.dataframe = pd.DataFrame()
+        summary = {
+            "output_path": output_path,
+            "rows": int(total_rows),
+            "how": how,
+            "on": join_keys,
+            "backend": backend,
+        }
+        print(
+            f"✅ Parquet join ({backend}) → {output_path} ({total_rows:,} rows, "
+            f"how={how}, on={join_keys})"
+        )
+        return summary
+
+    def _run_parquet_parquet_join(
+        self,
+        left_path: str,
+        right_path: str,
+        join_keys: list[str],
+        how: str,
+        output_path: str,
+        backend: str,
+        n_jobs: int,
+        max_concurrent_workers: int | None,
+        verbose: bool,
+        show_progress: bool,
+        join_key_precision: int | None = 6,
+    ) -> int:
+        backend = (backend or "pyarrow").lower()
+        if backend not in ("pyarrow", "duckdb"):
+            raise ValueError("backend must be 'pyarrow' or 'duckdb'")
+
+        use_parallel = (
+            n_jobs > 1
+            and self._is_single_parquet_file(left_path)
+            and self._is_single_parquet_file(right_path)
+        )
+        if n_jobs > 1 and not use_parallel:
+            print(
+                "⚠️ Parallel join requires single-file parquet inputs; "
+                "falling back to single-pass join."
+            )
+
+        if backend == "pyarrow":
+            if use_parallel:
+                return self._parallel_pyarrow_parquet_join(
+                    left_path=left_path,
+                    right_path=right_path,
+                    join_keys=join_keys,
+                    how=how,
+                    output_path=output_path,
+                    n_jobs=n_jobs,
+                    max_concurrent_workers=max_concurrent_workers,
+                    verbose=verbose,
+                    show_progress=show_progress,
+                    join_key_precision=join_key_precision,
+                )
+            return self._streaming_pyarrow_parquet_join(
+                left_path=left_path,
+                right_path=right_path,
+                join_keys=join_keys,
+                how=how,
+                output_path=output_path,
+                show_progress=show_progress,
+                join_key_precision=join_key_precision,
+            )
+
+        if use_parallel:
+            return self._parallel_parquet_duckdb_join(
+                left_path=left_path,
+                right_path=right_path,
+                join_keys=join_keys,
+                how=how,
+                output_path=output_path,
+                n_jobs=n_jobs,
+                max_concurrent_workers=max_concurrent_workers,
+                verbose=verbose,
+                show_progress=show_progress,
+                join_key_precision=join_key_precision,
+            )
+        if show_progress:
+            return self._streaming_duckdb_parquet_join(
+                left_path=left_path,
+                right_path=right_path,
+                join_keys=join_keys,
+                how=how,
+                output_path=output_path,
+                show_progress=show_progress,
+                join_key_precision=join_key_precision,
+            )
+
+        left_glob = self._parquet_read_glob(left_path)
+        right_glob = self._parquet_read_glob(right_path)
+        left_sql = self._duckdb_parquet_subquery(
+            left_glob, "l", join_keys, join_key_precision
+        )
+        right_sql = self._duckdb_parquet_subquery(
+            right_glob, "r", join_keys, join_key_precision
+        )
+        return self._duckdb_join_to_parquet(
+            left_sql, right_sql, join_keys, how, output_path
+        )
+
+    def join(
+        self,
+        dataframe,
+        on_column='index',
+        how='inner',
+        *,
+        backend: str = "pyarrow",
+        output_parquet_path: str | None = None,
+        n_jobs: int = 1,
+        max_concurrent_workers: int | None = None,
+        verbose: bool = False,
+        show_progress: bool = True,
+        overwrite: bool = False,
+        join_key_precision: int | None = 6,
+    ):
+        """
+        Join another table into this DataFrame.
+
+        Supports in-memory pandas merges and out-of-core parquet joins.
+
+        Parameters
+        ----------
+        dataframe : DataFrame, pandas.DataFrame, or str
+            Right-hand table. Pass another :class:`DataFrame` wrapper, a pandas
+            DataFrame, or a parquet file/dataset path. For parquet-backed
+            partners, pass the wrapper itself (``data_dem``), not ``data_dem.dataframe``.
+        on_column : str or list, default 'index'
+            Column name(s) to join on. Use ``'index'`` for index-based merge
+            (in-memory only).
+        how : str, default 'inner'
+            Join type: ``inner``, ``left``, ``right``, or ``full``.
+        backend : str, default 'pyarrow'
+            Parquet join engine: ``pyarrow`` (chunked pandas merge with tqdm)
+            or ``duckdb`` (SQL join, better for very large tables).
+        output_parquet_path : str, optional
+            Destination parquet path when joining parquet-backed data. When
+            omitted, writes ``{left_stem}_joined.parquet`` next to the left file.
+        n_jobs : int, default 1
+            Row partitions for parallel parquet joins (single-file inputs only).
+        max_concurrent_workers : int, optional
+            Max parallel threads (default ``min(n_jobs, 8)``).
+        verbose : bool, default False
+            Per-partition log messages for parallel joins.
+        show_progress : bool, default True
+            Show tqdm progress bars during parquet joins.
+        overwrite : bool, default False
+            Allow replacing an existing ``output_parquet_path``.
+        join_key_precision : int, optional, default 6
+            Decimal places to round numeric join keys before matching (``None``
+            to disable). Helps align lon/lat values across parquet files.
+
+        Returns
+        -------
+        pandas.DataFrame or dict
+            Updated in-memory DataFrame, or a summary dict for parquet joins.
+        """
+        left_is_parquet = self.data_type == "parquet" and hasattr(self, "dataset")
+        right_kind, right_value = self._resolve_join_partner(dataframe)
+        backend = (backend or "pyarrow").lower()
+        if backend not in ("pyarrow", "duckdb"):
+            raise ValueError("backend must be 'pyarrow' or 'duckdb'")
+
+        if on_column == "index":
+            if left_is_parquet or right_kind == "parquet":
+                raise ValueError(
+                    "Index joins are not supported for parquet-backed data. "
+                    "Provide explicit column name(s) via on_column."
+                )
+            self.dataframe = pd.merge(
+                self.get_dataframe(),
+                right_value,
+                left_index=True,
+                right_index=True,
+                how=how,
+            )
+            return self.dataframe
+
+        join_keys = list(on_column) if isinstance(on_column, (list, tuple)) else [on_column]
+
+        if left_is_parquet and right_kind == "parquet":
+            left_path = os.path.abspath(self.data_path)
+            right_path = right_value
+
+            if output_parquet_path is None:
+                left_stem = os.path.splitext(os.path.basename(left_path))[0]
+                out_dir = os.path.dirname(left_path) or "."
+                output_parquet_path = os.path.join(out_dir, f"{left_stem}_joined.parquet")
+            output_parquet_path = os.path.abspath(output_parquet_path)
+
+            if os.path.exists(output_parquet_path) and not overwrite:
+                raise FileExistsError(
+                    f"{output_parquet_path} exists (overwrite=False)."
+                )
+            os.makedirs(os.path.dirname(output_parquet_path) or ".", exist_ok=True)
+
+            total = self._run_parquet_parquet_join(
+                left_path=left_path,
+                right_path=right_path,
+                join_keys=join_keys,
+                how=how,
+                output_path=output_parquet_path,
+                backend=backend,
+                n_jobs=n_jobs,
+                max_concurrent_workers=max_concurrent_workers,
+                verbose=verbose,
+                show_progress=show_progress,
+                join_key_precision=join_key_precision,
+            )
+
+            return self._finalize_parquet_join(
+                output_parquet_path, total, how, join_keys, backend=backend
+            )
+
+        if left_is_parquet and right_kind == "pandas":
+            if output_parquet_path is None:
+                left_stem = os.path.splitext(os.path.basename(self.data_path))[0]
+                out_dir = os.path.dirname(os.path.abspath(self.data_path)) or "."
+                output_parquet_path = os.path.join(out_dir, f"{left_stem}_joined.parquet")
+            if os.path.exists(output_parquet_path) and not overwrite:
+                raise FileExistsError(
+                    f"{output_parquet_path} exists (overwrite=False)."
+                )
+
+            right_value_rounded = self._apply_join_key_precision(
+                right_value, join_keys, join_key_precision
+            )
+
+            if backend == "pyarrow":
+                total_left = self._parquet_row_count_at_path(self.data_path) or 0
+                pbar = tqdm(
+                    total=total_left,
+                    desc="Join (pyarrow)",
+                    unit="row",
+                    unit_scale=True,
+                    disable=not show_progress or total_left == 0,
+                )
+                writer = {"handle": None}
+                total = 0
+                try:
+                    for chunk in self._iter_parquet_file_chunks(self.data_path):
+                        chunk = self._apply_join_key_precision(
+                            chunk, join_keys, join_key_precision
+                        )
+                        merged = pd.merge(
+                            chunk, right_value_rounded, on=join_keys, how=how
+                        )
+                        if not merged.empty:
+                            total += self._write_join_chunk_to_parquet(
+                                merged, output_parquet_path, writer
+                            )
+                        pbar.update(len(chunk))
+                finally:
+                    if writer["handle"] is not None:
+                        writer["handle"].close()
+                    pbar.close()
+            else:
+                import duckdb
+
+                left_glob = self._parquet_read_glob(self.data_path).replace("'", "''")
+                left_sql = f"read_parquet('{left_glob}') AS l"
+                how_sql = how.upper() if how else "INNER"
+                using_cols = ", ".join(f'"{k}"' for k in join_keys)
+                sql = self._duckdb_parquet_join_sql(
+                    left_sql, "right_df AS r", how_sql, using_cols
+                )
+                total_left = self._parquet_row_count_at_path(self.data_path) or 0
+                pbar = tqdm(
+                    total=total_left,
+                    desc="Join (duckdb)",
+                    unit="row",
+                    unit_scale=True,
+                    disable=not show_progress or total_left == 0,
+                )
+                writer = {"handle": None}
+                total = 0
+                try:
+                    for chunk in self._iter_parquet_file_chunks(self.data_path):
+                        chunk = self._apply_join_key_precision(
+                            chunk, join_keys, join_key_precision
+                        )
+                        con = duckdb.connect()
+                        try:
+                            con.register(
+                                "right_df",
+                                self._apply_join_key_precision(
+                                    right_value, join_keys, join_key_precision
+                                ),
+                            )
+                            con.register("left_df", chunk)
+                            chunk_sql = self._duckdb_parquet_join_sql(
+                                "left_df AS l", "right_df AS r", how_sql, using_cols
+                            )
+                            result = con.execute(chunk_sql).fetchdf()
+                        finally:
+                            con.close()
+                        if not result.empty:
+                            total += self._write_join_chunk_to_parquet(
+                                result, output_parquet_path, writer
+                            )
+                        pbar.update(len(chunk))
+                finally:
+                    if writer["handle"] is not None:
+                        writer["handle"].close()
+                    pbar.close()
+
+            return self._finalize_parquet_join(
+                output_parquet_path, total, how, join_keys, backend=backend
+            )
+
+        if not left_is_parquet and right_kind == "parquet":
+            if backend == "pyarrow":
+                right_rows = self._parquet_row_count_at_path(right_value) or 0
+                left_df = self._apply_join_key_precision(
+                    self.get_dataframe(), join_keys, join_key_precision
+                )
+                pbar = tqdm(
+                    total=right_rows,
+                    desc="Join (pyarrow)",
+                    unit="row",
+                    unit_scale=True,
+                    disable=not show_progress or right_rows == 0,
+                )
+                parts = []
+                for chunk in self._iter_parquet_file_chunks(right_value):
+                    chunk = self._apply_join_key_precision(
+                        chunk, join_keys, join_key_precision
+                    )
+                    parts.append(pd.merge(left_df, chunk, on=join_keys, how=how))
+                    pbar.update(len(chunk))
+                pbar.close()
+                self.dataframe = (
+                    pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+                )
+            else:
+                import duckdb
+
+                right_glob = self._parquet_read_glob(right_value)
+                right_sql = self._duckdb_parquet_subquery(
+                    right_glob, "r", join_keys, join_key_precision
+                )
+                how_sql = how.upper() if how else "INNER"
+                using_cols = ", ".join(f'"{k}"' for k in join_keys)
+                sql = self._duckdb_parquet_join_sql(
+                    "left_df AS l", right_sql, how_sql, using_cols
+                )
+                con = duckdb.connect()
+                try:
+                    con.register(
+                        "left_df",
+                        self._apply_join_key_precision(
+                            self.get_dataframe(), join_keys, join_key_precision
+                        ),
+                    )
+                    self.dataframe = con.execute(sql).fetchdf()
+                finally:
+                    con.close()
+            self.data_type = "df"
+            return self.dataframe
+
+        left_df = self._apply_join_key_precision(
+            self.get_dataframe(), join_keys, join_key_precision
+        )
+        right_df = self._apply_join_key_precision(
+            right_value, join_keys, join_key_precision
+        )
+        self.dataframe = pd.merge(left_df, right_df, on=join_keys, how=how)
+        return self.dataframe
+        
     def interpolate_time_series(self, column_name, freq='d', method='linear', **kwargs):
         
         start_datetime = self.dataframe.index.min()
@@ -4804,8 +6589,27 @@ class DataFrame:
         return sc.fit_transform(X=self.get_dataframe())
     
     def copy(self):
-        # Deep copy
-        return copy.deepcopy(self)
+        """Return an independent copy of this DataFrame wrapper instance."""
+        clone = self.__class__.__new__(self.__class__)
+
+        for key, value in self.__dict__.items():
+            if key == "dataframe" and isinstance(value, pd.DataFrame):
+                # Ensure pandas data is detached from the original object.
+                setattr(clone, key, value.copy(deep=True))
+            elif key == "dataset" and getattr(self, "data_type", None) == "parquet" and getattr(self, "data_path", None):
+                # Recreate a fresh Arrow dataset handle from the same source path.
+                setattr(clone, key, ds.dataset(self.data_path, format="parquet"))
+            else:
+                try:
+                    setattr(clone, key, copy.deepcopy(value))
+                except Exception:
+                    # Fallback for non-deepcopyable runtime objects.
+                    setattr(clone, key, value)
+
+        if not hasattr(clone, "dataframe"):
+            clone.dataframe = pd.DataFrame()
+
+        return clone
     
     def column_to_standard_scale(self, column):
         sc = StandardScaler()
@@ -4867,9 +6671,47 @@ class DataFrame:
     def write_column_in_file(self, column, path='data/out.csv'):
         Lib.write_liste_in_file(path, self.get_column(column).apply(str))
 
-    def check_duplicated_rows(self, **kwargs):
+    def check_duplicated_rows(self, columns_list=None, ignore_columns_list=None, **kwargs):
+        """
+        Count duplicated rows with optional include/exclude column filters.
+
+        Args:
+            columns_list: columns to consider for duplicate detection.
+                If None, all columns are considered.
+            ignore_columns_list: columns to ignore from the considered set.
+            **kwargs: forwarded to pandas.DataFrame.duplicated (e.g., keep).
+
+        Notes:
+            - If legacy ``except_columns_list`` is provided in kwargs, it is treated
+              as ``ignore_columns_list`` for backward compatibility.
+            - ``columns_list`` has priority over any ``subset`` passed in kwargs.
+        """
+        df = self.get_dataframe()
+
+        # Backward compatibility with previous parameter name
+        if "except_columns_list" in kwargs and ignore_columns_list is None:
+            ignore_columns_list = kwargs.pop("except_columns_list")
+
+        # Build base subset
+        if columns_list is None:
+            subset = list(df.columns)
+        else:
+            if isinstance(columns_list, str):
+                columns_list = [columns_list]
+            subset = list(columns_list)
+
+        # Apply ignore logic (same behavior as previous except_columns_list)
+        if ignore_columns_list:
+            ignored = set(ignore_columns_list)
+            subset = [c for c in subset if c not in ignored]
+
+        if len(subset) == 0:
+            raise ValueError("No columns left to check after applying ignore_columns_list.")
+
+        kwargs["subset"] = subset
+
         # Count duplicated rows
-        duplicate_count = self.get_dataframe().duplicated(**kwargs).sum()
+        duplicate_count = df.duplicated(**kwargs).sum()
         # Display the count of duplicated rows
         print("Number of duplicated rows:", duplicate_count)
         return duplicate_count
@@ -7244,29 +9086,116 @@ class DataFrame:
         self.drop_column(datetime_column_name)
         self.rename_columns({'year_month': datetime_column_name})
 
-    def transform_column(self, column_name, transformation_func, in_place=True, *args):
-        """_summary_
+    def transform_column(self, column_name, transformation_func, in_place=True, *args, output_path=None, overwrite=False, compression="zstd", preserve_partitions=True, row_group_size=None, show_progress=True):
+        """
+        Apply a transformation function to a column, supporting both in-memory and parquet data types.
+        For parquet, rewrites the file(s) or dataset with the transformed column.
 
         Args:
-            column_to_trsform (_type_): column to transform
-            column_src (_type_): Column to use as a source for the transformation
-            fun_de_trasformation (_type_): The function of transformation, if it has multiple arguments pass them as args:
-            example: data.transform_column(column, column, Lib.remove_stopwords, True, stopwords)
-            in_place (bool, optional): If true the changes will affect the original dataframe. Defaults to True.
-
-        Returns:
-            _type_: _description_
+            column_name: Name of the column to transform.
+            transformation_func: Function to apply to each value.
+            in_place: If True, modifies the data in place (for parquet, overwrites source if output_path is None).
+            output_path: For parquet, where to write the new file/dataset. If None and in_place=True, overwrites source.
+            overwrite: Allow overwriting output_path.
+            compression: Parquet compression codec.
+            preserve_partitions: Keep source partition folder structure (dataset mode).
+            row_group_size: Optional row-group size for output (None = write incoming RGs as-is).
+            show_progress: Show tqdm progress bars.
         """
-        if in_place is True:
-            if (len(args) != 0):
-                self.set_column(column_name, self.get_column(column_name).apply(transformation_func, args=(args[0],)))
+        if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            if in_place is True:
+                if (len(args) != 0):
+                    self.set_column(column_name, self.get_column(column_name).apply(transformation_func, args=(args[0],)))
+                else:
+                    self.set_column(column_name, self.get_column(column_name).apply(transformation_func))
             else:
-                self.set_column(column_name, self.get_column(column_name).apply(transformation_func))
+                if (len(args) != 0):
+                    return self.get_column(column_name).apply(transformation_func, args=(args[0],))
+                else:
+                    return self.get_column(column_name).apply(transformation_func)
+            return
+
+        # Parquet path
+        import os
+        import pyarrow as pa
+        import pyarrow.dataset as ds
+        import pyarrow.parquet as pq
+        import pandas as pd
+        from tqdm import tqdm
+
+        is_single_file = os.path.isfile(self.data_path) and self.data_path.lower().endswith(".parquet")
+        out_path = output_path
+        if out_path is None and in_place:
+            out_path = self.data_path + ".tmp"
+        elif out_path is None:
+            raise ValueError("output_path must be specified for Parquet unless in_place=True")
+
+        if os.path.exists(out_path):
+            if not overwrite:
+                raise FileExistsError(f"Output path {out_path} exists and overwrite is False.")
+
+        def transform_col(tbl: pa.Table) -> pa.Array:
+            pdf = tbl.to_pandas()
+            if len(args) != 0:
+                return pa.array(pdf[column_name].apply(transformation_func, args=(args[0],)))
+            else:
+                return pa.array(pdf[column_name].apply(transformation_func))
+
+        files_written = 0
+        row_groups_written = 0
+        total_rows = 0
+
+        if is_single_file:
+            reader = pq.ParquetFile(self.data_path)
+            writer = None
+            for i in tqdm(range(reader.num_row_groups), desc="RowGroups", disable=not show_progress):
+                tbl = reader.read_row_group(i)
+                new_col = transform_col(tbl)
+                tbl = tbl.set_column(tbl.schema.get_field_index(column_name), column_name, new_col)
+                if writer is None:
+                    writer = pq.ParquetWriter(out_path, tbl.schema, compression=compression)
+                writer.write_table(tbl, row_group_size=row_group_size)
+                total_rows += tbl.num_rows
+                row_groups_written += 1
+            if writer:
+                writer.close()
+            files_written = 1
         else:
-            if (len(args) != 0):
-                return self.get_column(column_name).apply(transformation_func, args=(args[0],))
+            fragments = list(self.dataset.get_fragments())
+            os.makedirs(out_path, exist_ok=True)
+            for fragment in tqdm(fragments, desc="Fragments", disable=not show_progress):
+                for piece in fragment.split_by_row_group():
+                    tbl = piece.to_table()
+                    new_col = transform_col(tbl)
+                    tbl = tbl.set_column(tbl.schema.get_field_index(column_name), column_name, new_col)
+                    file_name = os.path.basename(piece.path)
+                    file_out = os.path.join(out_path, file_name)
+                    pq.write_table(tbl, file_out, compression=compression, row_group_size=row_group_size)
+                    total_rows += tbl.num_rows
+                    files_written += 1
+                    row_groups_written += 1
+
+        # In-place swap if needed
+        if in_place and output_path is None:
+            if is_single_file:
+                os.replace(out_path, self.data_path)
             else:
-                return self.get_column(column_name).apply(transformation_func)
+                import shutil
+                shutil.rmtree(self.data_path)
+                shutil.move(out_path, self.data_path)
+            self.dataset = ds.dataset(self.data_path, format="parquet")
+
+        print(f"✅ transform_column complete | Files: {files_written} | Rows: {total_rows:,}")
+        return {
+            "mode": "parquet",
+            "output_path": out_path,
+            "files_written": files_written,
+            "rows": total_rows,
+            "row_groups_written": row_groups_written,
+            "transformed_column": column_name,
+            "compression": compression,
+            "preserve_partitions": preserve_partitions,
+        }
             
     def column_to_no_accent(self, column):
         self.transform_column(column, Lib.no_accent)
@@ -7290,7 +9219,47 @@ class DataFrame:
         return self.get_dataframe().pivot_table(index=[column], aggfunc='size')
     
     def get_distinct_values_as_list(self, column):
-        return list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
+        if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            return list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
+
+        import pyarrow.compute as pc
+
+        schema_names = list(self.dataset.schema.names)
+        if column not in schema_names:
+            raise ValueError(f"Column '{column}' not found in parquet schema.")
+
+        distinct = set()
+        fragments = list(self.dataset.get_fragments())
+
+        for fragment in fragments:
+            try:
+                pieces = list(fragment.split_by_row_group())
+            except Exception:
+                pieces = [fragment]
+
+            for piece in pieces:
+                try:
+                    tbl = piece.to_table(columns=[column])
+                except Exception:
+                    continue
+                if tbl.num_rows == 0:
+                    continue
+
+                arr = tbl[column].combine_chunks()
+                try:
+                    arr = pc.drop_null(arr)
+                except Exception:
+                    pass
+                if len(arr) == 0:
+                    continue
+
+                uniq = pc.unique(arr).to_pylist()
+                distinct.update(v for v in uniq if v is not None)
+
+        try:
+            return sorted(distinct)
+        except Exception:
+            return list(distinct)
     
     def encode_textual_column(self, column):
         mapping = list(self.get_dataframe().pivot_table(index=[column], aggfunc='size').index)
@@ -7629,7 +9598,7 @@ class DataFrame:
     def export_column(self, column_name, out_file='out.csv'):
         self.get_column(column_name).to_csv(out_file, index=False)
     
-    def export(self, destination_path='data/json_dataframe.csv', type='csv', index=True):
+    def export(self, destination_path='data/json_dataframe.csv', type='csv', index=False):
         if type == 'json':
             destination_path = 'data/json_dataframe.json'
             self.get_dataframe().to_json(destination_path)
@@ -7812,10 +9781,125 @@ class DataFrame:
                 self.get_dataframe().to_parquet(destination_path, index=index)
         print('DataFrame exported successfully to ' + destination_path)
    
-    def sample(self, n=10, frac=None):
+    def sample(self, n=10, frac=None, random_state=42, show_progress=True):
+        """
+        Return a random sample of rows and store it in memory.
+
+        When ``data_type`` is ``'parquet'``, rows are sampled from the on-disk
+        dataset without loading the full file first; ``self.dataframe`` is
+        replaced and ``data_type`` becomes ``'df'``.
+
+        Parameters
+        ----------
+        n : int
+            Number of rows to sample (ignored when *frac* is set).
+        frac : float, optional
+            Fraction of rows to sample, in ``(0, 1]`` (pandas semantics).
+        random_state : int
+            Seed for reproducible random sampling.
+        show_progress : bool
+            Show a tqdm progress bar while reading parquet row groups.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self.data_type == 'parquet' and hasattr(self, 'dataset') and self.dataset is not None:
+            if frac is not None:
+                if not (0 < frac <= 1):
+                    raise ValueError("frac must be in (0, 1].")
+                total = self.dataset.count_rows()
+                n_rows = max(1, int(round(frac * total)))
+            else:
+                n_rows = int(n)
+            self.set_dataframe_from_parquet_sample(
+                n_rows=n_rows,
+                random=True,
+                random_state=random_state,
+                show_progress=show_progress,
+            )
+            return self.get_dataframe()
+
+        df = self.get_dataframe()
         if frac is not None:
-            return self.get_dataframe().sample(n=frac)
-        return self.get_dataframe().sample(n=n)
+            sampled = df.sample(frac=frac, random_state=random_state)
+        else:
+            sampled = df.sample(n=n, random_state=random_state)
+        self.set_dataframe(sampled, data_type='df')
+        return sampled
+
+    def keep_balanced_distribution(
+        self,
+        column_name,
+        n_rows=None,
+        random_state=None,
+        shuffle=True,
+    ):
+        """Keep a fixed number of rows per class/target value.
+
+        Parameters
+        ----------
+        column_name : str
+            Column used as class or target labels.
+        n_rows : int, optional
+            Number of rows to keep for each distinct value in *column_name*.
+            Defaults to the minority class count.
+        random_state : int, optional
+            Seed for reproducible sampling.
+        shuffle : bool, default True
+            Shuffle rows after balancing.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Balanced dataframe (also stored in the wrapper).
+        """
+        df = self.get_dataframe()
+        if column_name not in df.columns:
+            if self.data_type == 'parquet' and hasattr(self, 'dataset'):
+                df = self.dataset.to_table().to_pandas()
+            else:
+                raise ValueError(f"Column '{column_name}' not found.")
+
+        if column_name not in df.columns:
+            raise ValueError(f"Column '{column_name}' not found.")
+
+        class_counts = df[column_name].value_counts(dropna=False)
+        if class_counts.empty:
+            raise ValueError(f"Column '{column_name}' has no values.")
+
+        minority_count = int(class_counts.min())
+        if n_rows is None:
+            n_rows = minority_count
+        else:
+            n_rows = int(n_rows)
+            if n_rows <= 0:
+                raise ValueError("'n_rows' must be a positive integer.")
+
+        insufficient = class_counts[class_counts < n_rows]
+        if not insufficient.empty:
+            raise ValueError(
+                f"'n_rows'={n_rows} exceeds available rows for: "
+                f"{insufficient.to_dict()}. "
+                f"Maximum allowed is {minority_count}."
+            )
+
+        sampled_parts = []
+        for _, grp in df.groupby(column_name, dropna=False):
+            sampled_parts.append(grp.sample(n=n_rows, random_state=random_state))
+
+        balanced_df = pd.concat(sampled_parts, ignore_index=True)
+        if shuffle:
+            balanced_df = balanced_df.sample(frac=1, random_state=random_state).reset_index(
+                drop=True
+            )
+
+        self.set_dataframe(balanced_df)
+        print(
+            f"Balanced '{column_name}': kept {n_rows} rows per class "
+            f"({len(balanced_df)} total rows, {len(class_counts)} classes)."
+        )
+        return self.get_dataframe()
 
     def show(self, number_of_row=None):
         """
@@ -8383,6 +10467,582 @@ class DataFrame:
             "method": "custom" if callable(method) else str(method),
             "stats_meta": meta
         }
+
+
+    def outlier(
+        self,
+        columns: list[str] | None = None,
+        method: str = "zscore",
+        *,
+        exclude_columns: list[str] | None = None,
+        log_details: bool = True,
+        report_summary: bool = True,
+        threshold: float = 3.0,
+        iqr_factor: float = 1.5,
+        mad_thresh: float = 3.5,
+        quantile_low: float = 0.01,
+        quantile_high: float = 0.99,
+        contamination: float = 0.01,
+        n_estimators: int = 200,
+        n_neighbors: int = 20,
+        output_folder: str = "parquet_no_outliers",
+        overwrite: bool = False,
+        show_progress: bool = True,
+        sample_limit: int = 1_000_000,
+        random_state: int = 42,
+    ):
+        """
+        Remove outliers using one method over one or more columns.
+
+        Supported methods:
+            - 'isolation_forest' / 'isolation forest'
+            - 'local_outlier_factor' / 'local outlier factor' / 'lof'
+            - 'quantiles' (outside [quantile_low, quantile_high])
+            - 'zscore'        : |(x-mean)/std| > threshold
+            - 'robust_zscore' : |(x-median)/(1.4826*MAD)| > threshold
+            - 'iqr'           : outside [Q1 - iqr_factor*IQR, Q3 + iqr_factor*IQR]
+            - 'mad'           : |x - median| / (1.4826 * MAD) > mad_thresh
+
+        Column selection:
+            - columns=None with exclude_columns provided => apply on all columns except excluded
+            - columns provided => apply on those columns after removing excluded ones
+
+        For multiple columns, a row is removed if it is outlier in ANY selected column.
+        For parquet inputs, uses streaming/row-group logic similar to anomaly_filter_parquet.
+        """
+        import os
+        import numpy as np
+        import pandas as pd
+        from tqdm import tqdm
+
+        if isinstance(columns, str):
+            columns = [columns]
+        if isinstance(exclude_columns, str):
+            exclude_columns = [exclude_columns]
+        exclude_columns = list(exclude_columns or [])
+
+        method_norm = str(method).strip().lower().replace("-", " ").replace("_", " ")
+        if method_norm in {"isolationforest", "isolation forest", "iforest"}:
+            method_norm = "isolation_forest"
+        elif method_norm in {"localoutlierfactor", "local outlier factor", "lof"}:
+            method_norm = "local_outlier_factor"
+        elif method_norm in {"quantile", "quantiles"}:
+            method_norm = "quantiles"
+        elif method_norm in {"zscore", "robust zscore", "robust_zscore", "iqr", "mad"}:
+            method_norm = method_norm.replace(" ", "_")
+
+        supported = {
+            "isolation_forest",
+            "local_outlier_factor",
+            "quantiles",
+            "zscore",
+            "robust_zscore",
+            "iqr",
+            "mad",
+        }
+        if method_norm not in supported:
+            raise ValueError(f"Unsupported method '{method}'. Supported: {sorted(supported)}")
+
+        if not (0.0 < quantile_low < quantile_high < 1.0):
+            raise ValueError("quantile_low and quantile_high must satisfy 0 < low < high < 1.")
+
+        def _log(message: str):
+            if log_details:
+                print(f"[outlier] {message}")
+
+        def _report(summary: dict):
+            if not report_summary:
+                return
+            print("\n[outlier] ===== Summary =====")
+            print(f"[outlier] mode={summary.get('mode')} | method={summary.get('method')}")
+            print(
+                f"[outlier] rows_in={summary.get('rows_in'):,} | rows_out={summary.get('rows_out'):,} "
+                f"| removed={summary.get('removed'):,} ({summary.get('removed_pct')}%)"
+            )
+            print(f"[outlier] output={summary.get('output_file') or summary.get('output_root')}")
+            if summary.get("column_outlier_counts"):
+                print("[outlier] per-column outlier flags:")
+                for col, cnt in summary["column_outlier_counts"].items():
+                    print(f"  - {col}: {cnt:,}")
+
+        def _mask_for_col(values: np.ndarray, meta: dict) -> np.ndarray:
+            if method_norm == "zscore":
+                mean, std = meta.get("mean"), meta.get("std")
+                if std in (0, None) or np.isnan(std):
+                    return np.zeros_like(values, dtype=bool)
+                z = (values - mean) / std
+                return np.abs(z) > threshold
+
+            if method_norm in ("robust_zscore", "mad"):
+                med, mad = meta.get("median"), meta.get("mad")
+                if mad in (0, None) or np.isnan(mad):
+                    return np.zeros_like(values, dtype=bool)
+                rz = (values - med) / (1.4826 * mad)
+                limit = threshold if method_norm == "robust_zscore" else mad_thresh
+                return np.abs(rz) > limit
+
+            if method_norm == "iqr":
+                q1, q3 = meta.get("q1"), meta.get("q3")
+                if q1 is None or q3 is None or np.isnan(q1) or np.isnan(q3):
+                    return np.zeros_like(values, dtype=bool)
+                iqr = q3 - q1
+                low = q1 - iqr_factor * iqr
+                high = q3 + iqr_factor * iqr
+                return (values < low) | (values > high)
+
+            if method_norm == "quantiles":
+                low, high = meta.get("q_low"), meta.get("q_high")
+                if low is None or high is None or np.isnan(low) or np.isnan(high):
+                    return np.zeros_like(values, dtype=bool)
+                return (values < low) | (values > high)
+
+            return np.zeros_like(values, dtype=bool)
+
+        def _resolve_columns(available_columns: list[str]) -> list[str]:
+            exclude_set = set(exclude_columns)
+
+            if columns is None:
+                selected = [c for c in available_columns if c not in exclude_set]
+            else:
+                missing = [c for c in columns if c not in available_columns]
+                if missing:
+                    raise ValueError(f"Columns not found: {missing}")
+                selected = [c for c in columns if c not in exclude_set]
+
+            if not selected:
+                raise ValueError("No columns selected after applying exclude_columns.")
+            return selected
+
+        _log(f"Requested method={method_norm}")
+        _log(f"exclude_columns={exclude_columns}")
+
+        # ---------- In-memory pandas path ----------
+        if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            columns = _resolve_columns(list(self.dataframe.columns))
+            _log(f"Mode=pandas | selected_columns={len(columns)}")
+            if log_details:
+                cols_preview = columns[:12]
+                suffix = " ..." if len(columns) > 12 else ""
+                _log(f"Columns={cols_preview}{suffix}")
+
+            X = self.dataframe[columns].apply(pd.to_numeric, errors="coerce")
+            n_rows = len(X)
+            mask_out = np.zeros(n_rows, dtype=bool)
+            col_removed_counts = None
+            column_masks = {}
+
+            meta = {}
+            model = None
+            fill_values = None
+
+            if method_norm in {"isolation_forest", "local_outlier_factor"}:
+                try:
+                    from sklearn.ensemble import IsolationForest
+                    from sklearn.neighbors import LocalOutlierFactor
+                except Exception as e:
+                    raise ImportError("scikit-learn is required for Isolation Forest / LOF.") from e
+
+                fill_values = X.median(numeric_only=True).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+                Xf = X.fillna(fill_values).to_numpy(dtype=float)
+                valid_rows = ~np.all(np.isnan(X.to_numpy(dtype=float)), axis=1)
+
+                if np.any(valid_rows):
+                    fit_data = Xf[valid_rows]
+                    if sample_limit and fit_data.shape[0] > sample_limit:
+                        rng = np.random.default_rng(random_state)
+                        idx = rng.choice(fit_data.shape[0], size=sample_limit, replace=False)
+                        fit_data = fit_data[idx]
+
+                    fit_pbar = tqdm(total=2, desc="Pandas model", disable=not show_progress)
+                    if method_norm == "isolation_forest":
+                        model = IsolationForest(
+                            contamination=contamination,
+                            n_estimators=n_estimators,
+                            random_state=random_state,
+                            n_jobs=-1,
+                        )
+                        model.fit(fit_data)
+                    else:
+                        model = LocalOutlierFactor(
+                            n_neighbors=n_neighbors,
+                            contamination=contamination,
+                            novelty=True,
+                        )
+                        model.fit(fit_data)
+                    fit_pbar.update(1)
+
+                    pred = model.predict(Xf[valid_rows])
+                    mask_valid = pred == -1
+                    mask_out[valid_rows] = mask_valid
+                    fit_pbar.update(1)
+                    fit_pbar.close()
+                    _log(f"Model fitted on {fit_data.shape[0]:,} sampled rows; predicted on {int(valid_rows.sum()):,} valid rows")
+            else:
+                col_removed_counts = {c: 0 for c in columns}
+                for c in tqdm(columns, desc="Pandas columns", disable=not show_progress):
+                    vals = X[c].to_numpy(dtype=float)
+                    if method_norm == "zscore":
+                        meta[c] = {
+                            "mean": float(np.nanmean(vals)),
+                            "std": float(np.nanstd(vals, ddof=0)),
+                        }
+                    elif method_norm in {"mad", "robust_zscore"}:
+                        med = float(np.nanmedian(vals))
+                        mad = float(np.nanmedian(np.abs(vals - med)))
+                        meta[c] = {"median": med, "mad": mad}
+                    elif method_norm == "iqr":
+                        q1, q3 = np.nanpercentile(vals, [25, 75])
+                        meta[c] = {"q1": float(q1), "q3": float(q3)}
+                    elif method_norm == "quantiles":
+                        ql, qh = np.nanpercentile(vals, [quantile_low * 100, quantile_high * 100])
+                        meta[c] = {"q_low": float(ql), "q_high": float(qh)}
+
+                    col_mask = _mask_for_col(vals, meta[c])
+                    col_mask = np.where(np.isnan(vals), False, col_mask)
+                    col_removed_counts[c] += int(np.sum(col_mask))
+                    column_masks[c] = col_mask
+                    mask_out |= col_mask
+
+            rows_flagged = int(mask_out.sum())
+            replaced_cells = 0
+
+            if method_norm in {"isolation_forest", "local_outlier_factor"}:
+                if rows_flagged > 0:
+                    self.dataframe.loc[mask_out, columns] = None
+                    replaced_cells = rows_flagged * len(columns)
+            else:
+                for c in columns:
+                    col_mask = column_masks.get(c)
+                    if col_mask is None:
+                        continue
+                    n_col = int(np.sum(col_mask))
+                    if n_col > 0:
+                        self.dataframe.loc[self.dataframe.index[col_mask], c] = None
+                        replaced_cells += n_col
+
+            _log(
+                f"Pandas mode: replaced detected outliers with None in original dataframe "
+                f"(rows_flagged={rows_flagged:,}, replaced_cells={replaced_cells:,})"
+            )
+
+            summary = {
+                "mode": "pandas",
+                "rows_in": int(len(self.dataframe)),
+                "rows_out": int(len(self.dataframe)),
+                "removed": rows_flagged,
+                "removed_pct": round((rows_flagged / len(self.dataframe) * 100) if len(self.dataframe) else 0.0, 3),
+                "rows_flagged": rows_flagged,
+                "replaced_cells": int(replaced_cells),
+                "columns": columns,
+                "exclude_columns": exclude_columns,
+                "output_root": None,
+                "output_file": None,
+                "method": method_norm,
+                "stats_meta": meta,
+                "column_outlier_counts": col_removed_counts,
+            }
+            _report(summary)
+            return summary
+
+        # ---------- Parquet streaming path ----------
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        schema = self.dataset.schema
+        columns = _resolve_columns(list(schema.names))
+        _log(f"Mode=parquet | selected_columns={len(columns)}")
+        if log_details:
+            cols_preview = columns[:12]
+            suffix = " ..." if len(columns) > 12 else ""
+            _log(f"Columns={cols_preview}{suffix}")
+
+        is_single_file = os.path.isfile(self.data_path) and self.data_path.lower().endswith(".parquet")
+
+        output_folder = os.path.abspath(output_folder)
+        if os.path.exists(output_folder) and not overwrite:
+            raise FileExistsError(f"{output_folder} exists. Set overwrite=True.")
+
+        if is_single_file and output_folder.lower().endswith(".parquet"):
+            out_is_file = True
+            out_file_single = output_folder
+            os.makedirs(os.path.dirname(out_file_single) or ".", exist_ok=True)
+        elif is_single_file:
+            out_is_file = True
+            os.makedirs(output_folder, exist_ok=True)
+            base = os.path.splitext(os.path.basename(self.data_path))[0]
+            out_file_single = os.path.join(output_folder, f"{base}_no_outliers.parquet")
+        else:
+            out_is_file = False
+            os.makedirs(output_folder, exist_ok=True)
+
+        # -------- Stats/model fit pass --------
+        meta = {c: {} for c in columns}
+        model = None
+        fill_values = {c: 0.0 for c in columns}
+        col_removed_counts = None
+
+        fragments = list(self.dataset.get_fragments())
+        _log(f"Fragments to process: {len(fragments)}")
+
+        if method_norm == "zscore":
+            counts = {c: 0 for c in columns}
+            sums = {c: 0.0 for c in columns}
+            sumsqs = {c: 0.0 for c in columns}
+
+            for frag in tqdm(fragments, desc="Stats pass (zscore)", disable=not show_progress):
+                pf = pq.ParquetFile(frag.path)
+                for rg_idx in range(pf.num_row_groups):
+                    tbl = pf.read_row_group(rg_idx, columns=columns)
+                    for c in columns:
+                        vals = pd.to_numeric(tbl[c].to_pandas(), errors="coerce").to_numpy(dtype=float)
+                        vals = vals[~np.isnan(vals)]
+                        if vals.size == 0:
+                            continue
+                        counts[c] += int(vals.size)
+                        sums[c] += float(np.sum(vals))
+                        sumsqs[c] += float(np.sum(vals * vals))
+
+            for c in columns:
+                n = counts[c]
+                if n <= 0:
+                    meta[c] = {"mean": float("nan"), "std": float("nan")}
+                    continue
+                mean = sums[c] / n
+                var = max((sumsqs[c] / n) - (mean * mean), 0.0)
+                meta[c] = {"mean": float(mean), "std": float(np.sqrt(var))}
+
+        elif method_norm in {"mad", "robust_zscore", "iqr", "quantiles"}:
+            samples = {c: [] for c in columns}
+            collected = {c: 0 for c in columns}
+
+            for frag in tqdm(fragments, desc=f"Stats pass ({method_norm})", disable=not show_progress):
+                if all(collected[c] >= sample_limit for c in columns):
+                    break
+                pf = pq.ParquetFile(frag.path)
+                for rg_idx in range(pf.num_row_groups):
+                    if all(collected[c] >= sample_limit for c in columns):
+                        break
+                    tbl = pf.read_row_group(rg_idx, columns=columns)
+                    for c in columns:
+                        if collected[c] >= sample_limit:
+                            continue
+                        vals = pd.to_numeric(tbl[c].to_pandas(), errors="coerce").to_numpy(dtype=float)
+                        vals = vals[~np.isnan(vals)]
+                        if vals.size == 0:
+                            continue
+                        take = min(vals.size, sample_limit - collected[c])
+                        samples[c].append(vals[:take])
+                        collected[c] += int(take)
+
+            for c in columns:
+                if collected[c] == 0:
+                    meta[c] = {}
+                    continue
+                samp = np.concatenate(samples[c], axis=0)
+                if method_norm in {"mad", "robust_zscore"}:
+                    med = float(np.median(samp))
+                    mad = float(np.median(np.abs(samp - med)))
+                    meta[c] = {"median": med, "mad": mad}
+                elif method_norm == "iqr":
+                    q1, q3 = np.percentile(samp, [25, 75])
+                    meta[c] = {"q1": float(q1), "q3": float(q3)}
+                else:
+                    ql, qh = np.percentile(samp, [quantile_low * 100, quantile_high * 100])
+                    meta[c] = {"q_low": float(ql), "q_high": float(qh)}
+
+        elif method_norm in {"isolation_forest", "local_outlier_factor"}:
+            try:
+                from sklearn.ensemble import IsolationForest
+                from sklearn.neighbors import LocalOutlierFactor
+            except Exception as e:
+                raise ImportError("scikit-learn is required for Isolation Forest / LOF.") from e
+
+            sample_rows = []
+            collected = 0
+
+            for frag in tqdm(fragments, desc=f"Stats pass ({method_norm})", disable=not show_progress):
+                if collected >= sample_limit:
+                    break
+                pf = pq.ParquetFile(frag.path)
+                for rg_idx in range(pf.num_row_groups):
+                    if collected >= sample_limit:
+                        break
+                    tbl = pf.read_row_group(rg_idx, columns=columns)
+                    part = tbl.to_pandas()
+                    for c in columns:
+                        part[c] = pd.to_numeric(part[c], errors="coerce")
+                    Xp = part[columns].to_numpy(dtype=float)
+                    valid = ~np.all(np.isnan(Xp), axis=1)
+                    if not np.any(valid):
+                        continue
+                    Xv = Xp[valid]
+                    take = min(Xv.shape[0], sample_limit - collected)
+                    sample_rows.append(Xv[:take])
+                    collected += int(take)
+
+            if collected == 0:
+                raise ValueError("No valid rows found to fit outlier model.")
+
+            fit_data = np.concatenate(sample_rows, axis=0)
+            medians = np.nanmedian(fit_data, axis=0)
+            medians = np.where(np.isnan(medians), 0.0, medians)
+            fill_values = {c: float(medians[i]) for i, c in enumerate(columns)}
+
+            fit_data_filled = np.where(np.isnan(fit_data), medians, fit_data)
+
+            if method_norm == "isolation_forest":
+                model = IsolationForest(
+                    contamination=contamination,
+                    n_estimators=n_estimators,
+                    random_state=random_state,
+                    n_jobs=-1,
+                )
+                model.fit(fit_data_filled)
+            else:
+                model = LocalOutlierFactor(
+                    n_neighbors=n_neighbors,
+                    contamination=contamination,
+                    novelty=True,
+                )
+                model.fit(fit_data_filled)
+
+        # -------- Replacement pass (row-preserving) --------
+        total_in = 0
+        total_out = 0
+        total_rows_flagged = 0
+        total_replaced_cells = 0
+        writer_single = None
+        col_removed_counts = {c: 0 for c in columns}
+
+        frag_bar = tqdm(fragments, desc="Replacing outliers", disable=not show_progress)
+        for frag in frag_bar:
+            pf = pq.ParquetFile(frag.path)
+
+            if not out_is_file:
+                root_abs = os.path.abspath(self.data_path)
+                frag_rel = frag.path if os.path.isabs(frag.path) else os.path.relpath(frag.path, root_abs)
+                out_dir = os.path.join(output_folder, os.path.dirname(frag_rel))
+                os.makedirs(out_dir, exist_ok=True)
+                out_file = os.path.join(out_dir, os.path.basename(frag_rel))
+                writer_fragment = None
+
+            rg_iter = tqdm(
+                range(pf.num_row_groups),
+                desc=f"RowGroups:{os.path.basename(frag.path)}",
+                leave=False,
+                disable=not show_progress,
+            ) if show_progress else range(pf.num_row_groups)
+
+            for rg_idx in rg_iter:
+                rg_tbl = pf.read_row_group(rg_idx, use_threads=True)
+                nrg = rg_tbl.num_rows
+                total_in += nrg
+                if nrg == 0:
+                    continue
+
+                row_mask_out = np.zeros(nrg, dtype=bool)
+                col_masks = {c: np.zeros(nrg, dtype=bool) for c in columns}
+
+                if method_norm in {"isolation_forest", "local_outlier_factor"}:
+                    frame = rg_tbl.select(columns).to_pandas()
+                    for c in columns:
+                        frame[c] = pd.to_numeric(frame[c], errors="coerce")
+                    Xg = frame[columns].to_numpy(dtype=float)
+                    valid = ~np.all(np.isnan(Xg), axis=1)
+                    if np.any(valid):
+                        med = np.array([fill_values[c] for c in columns], dtype=float)
+                        Xv = Xg[valid]
+                        Xv = np.where(np.isnan(Xv), med, Xv)
+                        pred = model.predict(Xv)
+                        row_mask_out[valid] = (pred == -1)
+                    for c in columns:
+                        col_masks[c] = row_mask_out.copy()
+                else:
+                    for c in columns:
+                        vals = pd.to_numeric(rg_tbl[c].to_pandas(), errors="coerce").to_numpy(dtype=float)
+                        col_mask = _mask_for_col(vals, meta.get(c, {}))
+                        col_mask = np.where(np.isnan(vals), False, col_mask)
+                        col_masks[c] = col_mask
+                        col_removed_counts[c] += int(np.sum(col_mask))
+                        row_mask_out |= col_mask
+
+                rows_flagged_rg = int(np.sum(row_mask_out))
+                total_rows_flagged += rows_flagged_rg
+
+                tbl_out = rg_tbl
+                if rows_flagged_rg > 0:
+                    for c in columns:
+                        cm = col_masks[c]
+                        n_replace_col = int(np.sum(cm))
+                        if n_replace_col == 0:
+                            continue
+                        total_replaced_cells += n_replace_col
+                        if method_norm in {"isolation_forest", "local_outlier_factor"}:
+                            col_removed_counts[c] += n_replace_col
+
+                        s = rg_tbl[c].to_pandas().copy()
+                        s.loc[cm] = None
+                        arr_new = pa.array(s, type=rg_tbl[c].type, from_pandas=True)
+                        col_idx = tbl_out.schema.get_field_index(c)
+                        tbl_out = tbl_out.set_column(col_idx, c, arr_new)
+
+                total_out += tbl_out.num_rows
+
+                if out_is_file:
+                    if writer_single is None:
+                        writer_single = pq.ParquetWriter(
+                            out_file_single,
+                            tbl_out.schema,
+                            compression="zstd",
+                            use_dictionary=True,
+                            write_statistics=True,
+                        )
+                    writer_single.write_table(tbl_out)
+                else:
+                    if writer_fragment is None:
+                        writer_fragment = pq.ParquetWriter(
+                            out_file,
+                            tbl_out.schema,
+                            compression="zstd",
+                            use_dictionary=True,
+                            write_statistics=True,
+                        )
+                    writer_fragment.write_table(tbl_out)
+
+            if not out_is_file and 'writer_fragment' in locals() and writer_fragment is not None:
+                writer_fragment.close()
+
+            if show_progress and total_in:
+                frag_bar.set_postfix(written=total_out, flagged=total_rows_flagged, cells=total_replaced_cells)
+
+        if writer_single is not None:
+            writer_single.close()
+
+        if total_out == 0:
+            empty_tbl = pa.table({c: pa.array([], type=schema.field(c).type) for c in schema.names})
+            if out_is_file:
+                pq.write_table(empty_tbl, out_file_single, compression="zstd")
+            else:
+                pq.write_table(empty_tbl, os.path.join(output_folder, "empty.parquet"), compression="zstd")
+
+        summary = {
+            "mode": "parquet_single_file" if is_single_file else "parquet_dataset",
+            "rows_in": int(total_in),
+            "rows_out": int(total_out),
+            "removed": int(total_rows_flagged),
+            "removed_pct": round((total_rows_flagged / total_in * 100) if total_in else 0.0, 3),
+            "rows_flagged": int(total_rows_flagged),
+            "replaced_cells": int(total_replaced_cells),
+            "columns": columns,
+            "exclude_columns": exclude_columns,
+            "output_root": output_folder if not out_is_file else os.path.dirname(out_file_single),
+            "output_file": out_file_single if out_is_file else None,
+            "method": method_norm,
+            "stats_meta": meta,
+            "column_outlier_counts": col_removed_counts,
+        }
+        _report(summary)
+        return summary
     
     
     
@@ -9308,8 +11968,46 @@ class DataFrame:
         max_column = self.get_column(column).describe()['max']
         self.transform_column(column, self.scale_trasform_fun, max_column)
 
-    def drop_duplicated_rows(self, **kwargs):
-        self.set_dataframe(self.dataframe.drop_duplicates(keep='first', **kwargs))
+    def drop_duplicated_rows(self, columns_list=None, ignore_columns_list=None, keep='first', **kwargs):
+        """
+        Drop duplicated rows with optional include/exclude column filters.
+
+        Args:
+            columns_list: columns to consider for duplicate detection.
+                If None, all columns are considered.
+            ignore_columns_list: columns to ignore from the considered set.
+            keep: which duplicate to keep ("first", "last", or False). Defaults to "first".
+            **kwargs: forwarded to pandas.DataFrame.drop_duplicates.
+
+        Notes:
+            - If legacy ``except_columns_list`` is provided in kwargs, it is treated
+              as ``ignore_columns_list`` for backward compatibility.
+            - ``columns_list`` has priority over any ``subset`` passed in kwargs.
+        """
+        df = self.get_dataframe()
+
+        # Backward compatibility with previous parameter name
+        if "except_columns_list" in kwargs and ignore_columns_list is None:
+            ignore_columns_list = kwargs.pop("except_columns_list")
+
+        # Build base subset
+        if columns_list is None:
+            subset = list(df.columns)
+        else:
+            if isinstance(columns_list, str):
+                columns_list = [columns_list]
+            subset = list(columns_list)
+
+        # Apply ignore logic (same behavior as check_duplicated_rows)
+        if ignore_columns_list:
+            ignored = set(ignore_columns_list)
+            subset = [c for c in subset if c not in ignored]
+
+        if len(subset) == 0:
+            raise ValueError("No columns left to check after applying ignore_columns_list.")
+
+        kwargs["subset"] = subset
+        self.set_dataframe(df.drop_duplicates(keep=keep, **kwargs))
         
     def drop_duplicated_indexes(self, level=None,**kwargs):
         if level == 'd':
@@ -9323,6 +12021,63 @@ class DataFrame:
         
     def to_numpy(self):
         return self.get_dataframe().values
+
+    def to_geodataframe(self, lon_column_name, lat_column_name, output_geodataframe_path, crs=4326):
+        """
+        Build a point GeoDataFrame from lon/lat columns and write it to disk.
+
+        Output format is inferred from ``output_geodataframe_path`` extension:
+        ``.parquet``/``.pq``, ``.geojson``/``.json``, ``.shp``, ``.gpkg``,
+        ``.fgb``, or ``.kml``.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            The in-memory GeoDataFrame that was written.
+        """
+        import geopandas as gpd
+        from shapely.geometry import Point
+
+        if not lon_column_name or not lat_column_name:
+            raise ValueError("lon_column_name and lat_column_name must be provided.")
+        if not output_geodataframe_path:
+            raise ValueError("output_geodataframe_path must be provided.")
+
+        df = self.get_dataframe()
+        for col in (lon_column_name, lat_column_name):
+            if col not in df.columns:
+                raise KeyError(f"Column not found: {col!r}")
+
+        geometry = [
+            Point(lon, lat)
+            for lon, lat in zip(df[lon_column_name], df[lat_column_name])
+        ]
+        gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=crs)
+
+        ext = os.path.splitext(output_geodataframe_path)[1].lower()
+        out_dir = os.path.dirname(os.path.abspath(output_geodataframe_path))
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        if ext in (".parquet", ".pq"):
+            gdf.to_parquet(output_geodataframe_path, index=False)
+        elif ext in (".geojson", ".json"):
+            gdf.to_file(output_geodataframe_path, driver="GeoJSON")
+        elif ext == ".shp":
+            gdf.to_file(output_geodataframe_path, driver="ESRI Shapefile")
+        elif ext == ".gpkg":
+            gdf.to_file(output_geodataframe_path, driver="GPKG")
+        elif ext == ".fgb":
+            gdf.to_file(output_geodataframe_path, driver="FlatGeobuf")
+        elif ext == ".kml":
+            gdf.to_file(output_geodataframe_path, driver="KML")
+        else:
+            raise ValueError(
+                f"Unsupported output extension: {ext!r}. "
+                "Use .parquet, .pq, .geojson, .json, .shp, .gpkg, .fgb, or .kml."
+            )
+
+        return gdf
     
     @staticmethod
     def generate_datetime_range_dataframe(start_datetime='2013-01-01 00:00:00', 
@@ -9990,6 +12745,170 @@ class DataFrame:
     def add_month_day_column(self, date_time_column_name='date_time'):
         self.add_column('month-day', self.get_column(date_time_column_name).dt.month.astype(str) + '-' + self.get_column(date_time_column_name).dt.day.astype(str))
     
+    def question_answer_lines_to_mcq(self,
+                                      txt_path,
+                                      output_dataset_path='mcq_dataset.csv',
+                                      load=True,
+                                      random_state=None):
+        """Parse a Q&A text file and build an MCQ-style CSV dataset.
+
+        The input file must contain alternating lines: a question line
+        followed by its answer on the next line. A question is detected
+        by searching for ``?`` or ``؟`` (Arabic question mark).
+
+        The produced CSV has columns:
+        ``question, answer, choice1, choice2, choice3``.
+        The correct answer is randomly placed into one of the three
+        choices; the remaining two are left empty.
+
+        Parameters
+        ----------
+        txt_path : str
+            Path to the input ``.txt`` file.
+        output_dataset_path : str
+            Destination CSV path. Defaults to ``'mcq_dataset.csv'``.
+        load : bool
+            If True, load the resulting CSV into this DataFrame instance
+            after export.  If False, only write the file.
+        random_state : int or None
+            Seed for reproducibility of the random choice placement.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The MCQ dataset (also exported as CSV).
+        """
+        import random
+
+        if random_state is not None:
+            random.seed(random_state)
+
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            raw_lines = f.readlines()
+
+        # Strip and drop blank lines
+        lines = [l.strip() for l in raw_lines if l.strip()]
+
+        # Pair up questions and answers
+        questions = []
+        answers = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if '?' in line or '؟' in line:
+                questions.append(line)
+                if i + 1 < len(lines):
+                    answers.append(lines[i + 1])
+                    i += 2
+                else:
+                    answers.append('')
+                    i += 1
+            else:
+                i += 1
+
+        # Build MCQ rows
+        rows = []
+        for q, a in zip(questions, answers):
+            choices = ['', '', '']
+            slot = random.randint(0, 2)
+            choices[slot] = a
+            rows.append({
+                'question': q,
+                'answer': a,
+                'choice1': choices[0],
+                'choice2': choices[1],
+                'choice3': choices[2],
+            })
+
+        mcq_df = pd.DataFrame(rows, columns=['question', 'answer',
+                                               'choice1', 'choice2', 'choice3'])
+        mcq_df.to_csv(output_dataset_path, index=False, encoding='utf-8-sig')
+        print(f"✅ MCQ dataset exported to {output_dataset_path} "
+              f"({len(mcq_df)} questions)")
+
+        if load:
+            self.dataframe = mcq_df
+            self.data_type = 'df'
+
+        return mcq_df
+
+    def mcq_in_lines_to_mcq(self,
+                             txt_path,
+                             output_dataset_path='mcq_dataset.csv',
+                             load=True):
+        """Parse an MCQ text file and build a CSV dataset.
+
+        The input file contains blocks separated by blank lines.
+        Each block has:
+          1. A question line (detected by ``?`` or ``؟``).
+          2. Two or three choice lines.
+          3. The correct answer as the last line (matches one choice).
+
+        The produced CSV has columns:
+        ``question, answer, choice1, choice2, choice3``.
+        When there are only two choices, ``choice3`` is left empty.
+
+        Parameters
+        ----------
+        txt_path : str
+            Path to the input ``.txt`` file.
+        output_dataset_path : str
+            Destination CSV path.  Defaults to ``'mcq_dataset.csv'``.
+        load : bool
+            If True, load the resulting CSV into this DataFrame instance
+            after export.  If False, only write the file.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The MCQ dataset (also exported as CSV).
+        """
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            raw = f.read()
+
+        # Split into blocks by one or more blank lines
+        blocks = [b.strip() for b in raw.split('\n\n') if b.strip()]
+
+        rows = []
+        for block in blocks:
+            lines = [l.strip() for l in block.splitlines() if l.strip()]
+            if len(lines) < 3:
+                # Need at least: question + 1 choice + answer
+                continue
+
+            # First line must be the question
+            question = lines[0]
+            if '?' not in question and '؟' not in question:
+                continue
+
+            answer = lines[-1]            # last line is always the answer
+            choices_raw = lines[1:-1]     # everything between question and answer
+
+            # Fill into 3 slots
+            choice1 = choices_raw[0] if len(choices_raw) >= 1 else ''
+            choice2 = choices_raw[1] if len(choices_raw) >= 2 else ''
+            choice3 = choices_raw[2] if len(choices_raw) >= 3 else ''
+
+            rows.append({
+                'question': question,
+                'answer': answer,
+                'choice1': choice1,
+                'choice2': choice2,
+                'choice3': choice3,
+            })
+
+        mcq_df = pd.DataFrame(rows, columns=['question', 'answer',
+                                               'choice1', 'choice2', 'choice3'])
+        mcq_df.to_csv(output_dataset_path, index=False, encoding='utf-8-sig')
+        print(f"✅ MCQ dataset exported to {output_dataset_path} "
+              f"({len(mcq_df)} questions)")
+
+        if load:
+            self.dataframe = mcq_df
+            self.data_type = 'df'
+
+        return mcq_df
+
     def scale_columns(self, columns_names_as_list, scaler_type='min_max', in_place=True):
         """A method  to standardize the independent features present in the concerned columns in a fixed range.
 
@@ -10070,27 +12989,171 @@ class DataFrame:
             self.set_dataframe(x)
             self.add_column('target', y)  
             
-    def similarity_measure(self, column_name1, column_name2, similarity_method='cosine', weighting_method='tfidf'):
-        if similarity_method == 'cosine':
-            corpus = self.get_column_as_list(column_name1) + self.get_column_as_list(column_name2)
-            vectorizer = Vectorizer(corpus, weighting_method)
-            print(len(self.get_column_as_list(column_name1)))
-            print(len(self.get_column_as_list(column_name2)))
-            new_column = []
-            for p in zip(self.get_column_as_list(column_name1), self.get_column_as_list(column_name2)):
-                new_column.append(vectorizer.cosine_similarity(p[0], p[1])) 
+    def similarity_measure(self, column_name1, column_name2, similarity_method='ts', weighting_method='tfidf', output_file_path=None):
+        """
+        Calculate similarity/regression metrics between two columns.
+        
+        Supports both in-memory DataFrames and Parquet files.
+        
+        Parameters
+        ----------
+        column_name1 : str
+            Name of the first column
+        column_name2 : str
+            Name of the second column
+        similarity_method : str, default 'ts'
+            'cosine' - cosine similarity using vectorizer
+            'ts' - regression metrics (R2, RMSE, MAE, etc.)
+        weighting_method : str, default 'tfidf'
+            Weighting method for cosine similarity
+        output_file_path : str, optional
+            Path to save metrics. If None, uses {column_name1}_{column_name2}_similarity.txt
             
+        Returns
+        -------
+        dict or pd.DataFrame
+            If 'ts': dict with regression metrics
+            If 'cosine': DataFrame with similarity scores
+        """
+        from sklearn.metrics import (
+            r2_score, mean_squared_error, mean_absolute_error,
+            median_absolute_error
+        )
+        import math
+        import os
+        
+        # Prioritize in-memory dataframe if it exists and is not empty
+        if hasattr(self, 'dataframe') and self.dataframe is not None and not self.dataframe.empty:
+            df = self.get_dataframe()
+        # Otherwise, load data from parquet if in parquet mode
+        elif self.data_type == 'parquet' and hasattr(self, 'dataset'):
+            if verbose := False:  # Use walrus operator for clarity
+                print("📦 Loading parquet data into memory for similarity calculation...")
+            df = self.load_parquet_to_in_memory_dataframe(columns=[column_name1, column_name2], show_progress=True)
+        else:
+            df = self.get_dataframe()
+        
+        # Validate columns exist
+        if column_name1 not in df.columns:
+            raise ValueError(f"Column '{column_name1}' not found in dataframe")
+        if column_name2 not in df.columns:
+            raise ValueError(f"Column '{column_name2}' not found in dataframe")
+        
+        col1 = pd.to_numeric(df[column_name1], errors='coerce')
+        col2 = pd.to_numeric(df[column_name2], errors='coerce')
+        
+        # Remove NaN values
+        mask = col1.notna() & col2.notna()
+        col1_clean = col1[mask]
+        col2_clean = col2[mask]
+        
+        if len(col1_clean) == 0:
+            raise ValueError(f"No valid numeric data after removing NaNs")
+        
+        if similarity_method == 'cosine':
+            corpus = df[column_name1].astype(str).tolist() + df[column_name2].astype(str).tolist()
+            vectorizer = Vectorizer(corpus, weighting_method)
+            new_column = []
+            for p in zip(df[column_name1].astype(str), df[column_name2].astype(str)):
+                new_column.append(vectorizer.cosine_similarity(p[0], p[1]))
             self.add_column('Similarity score', new_column)
+            return self.get_dataframe()
         
         elif similarity_method == 'ts':
-            from sklearn.metrics import r2_score, mean_squared_error
-            import math
-            comparaison_dict = {}
-            comparaison_dict['RMSE'] = math.sqrt(mean_squared_error(self.get_column(column_name1), self.get_column(column_name2)))
-            comparaison_dict['R²'] = r2_score(self.get_column(column_name1), self.get_column(column_name2))
-            comparaison_dict['R'] = self.get_column(column_name1).corr(self.get_column(column_name2))
+            # Calculate regression metrics
+            mse = mean_squared_error(col1_clean, col2_clean)
+            rmse = math.sqrt(mse)
             
-            return comparaison_dict
+            def _nrmse_mean(y_t, y_p):
+                m = np.mean(y_t)
+                return rmse / m if m != 0 else np.nan
+            
+            def _nrmse_range(y_t, y_p):
+                rng = np.max(y_t) - np.min(y_t)
+                return rmse / rng if rng > 0 else np.nan
+            
+            def _mape(y_t, y_p):
+                mask = y_t != 0
+                return 100.0 * np.mean(np.abs((y_t[mask] - y_p[mask]) / y_t[mask])) if np.any(mask) else np.nan
+            
+            def _smape(y_t, y_p):
+                denom = np.abs(y_t) + np.abs(y_p)
+                mask = denom != 0
+                return 100.0 * np.mean(2.0 * np.abs(y_p[mask] - y_t[mask]) / denom[mask]) if np.any(mask) else np.nan
+            
+            def _mpe(y_t, y_p):
+                mask = y_t != 0
+                return 100.0 * np.mean((y_p[mask] - y_t[mask]) / y_t[mask]) if np.any(mask) else np.nan
+            
+            def _pbias(y_t, y_p):
+                denom = np.sum(y_t)
+                return 100.0 * np.sum(y_p - y_t) / denom if denom != 0 else np.nan
+            
+            def _nse(y_t, y_p):
+                denom = np.sum((y_t - np.mean(y_t)) ** 2)
+                return 1.0 - np.sum((y_p - y_t)**2) / denom if denom > 0 else np.nan
+            
+            def _kge(y_t, y_p):
+                sy, sp = np.std(y_t), np.std(y_p)
+                if sy == 0 or sp == 0:
+                    return np.nan
+                r = np.corrcoef(y_t, y_p)[0, 1]
+                alpha = sp / sy
+                mu_y, mu_p = np.mean(y_t), np.mean(y_p)
+                beta = (mu_p / mu_y) if mu_y != 0 else np.nan
+                if np.isnan(r) or np.isnan(beta):
+                    return np.nan
+                return 1.0 - np.sqrt((r - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
+            
+            def _rae(y_t, y_p):
+                denom = np.sum(np.abs(y_t - np.mean(y_t)))
+                return np.sum(np.abs(y_t - y_p)) / denom if denom != 0 else np.nan
+            
+            def _rse(y_t, y_p):
+                denom = np.sum((y_t - np.mean(y_t)) ** 2)
+                return np.sum((y_t - y_p) ** 2) / denom if denom != 0 else np.nan
+            
+            y_t = col1_clean.values
+            y_p = col2_clean.values
+            
+            metrics_dict = {
+                'R2': float(r2_score(y_t, y_p)),
+                'R': float(np.corrcoef(y_t, y_p)[0, 1]) if (np.std(y_t) > 0 and np.std(y_p) > 0) else np.nan,
+                'MSE': float(mse),
+                'RMSE': float(rmse),
+                'NRMSE_mean': float(_nrmse_mean(y_t, y_p)),
+                'NRMSE_range': float(_nrmse_range(y_t, y_p)),
+                'MAE': float(mean_absolute_error(y_t, y_p)),
+                'MEDAE': float(median_absolute_error(y_t, y_p)),
+                'MAPE': float(_mape(y_t, y_p)),
+                'SMAPE': float(_smape(y_t, y_p)),
+                'MPE': float(_mpe(y_t, y_p)),
+                'Bias': float(np.mean(y_p - y_t)),
+                'PBIAS': float(_pbias(y_t, y_p)),
+                'CV_RMSE_%': float(100.0 * rmse / np.mean(y_t)) if np.mean(y_t) != 0 else np.nan,
+                'RAE': float(_rae(y_t, y_p)),
+                'RSE': float(_rse(y_t, y_p)),
+                'NSE': float(_nse(y_t, y_p)),
+                'KGE': float(_kge(y_t, y_p)),
+            }
+            
+            # Check if we can use MSLE (requires positive values)
+            if np.all(y_t > 0) and np.all(y_p > 0):
+                from sklearn.metrics import mean_squared_log_error
+                metrics_dict['MSLE'] = float(mean_squared_log_error(y_t, y_p))
+            
+            # Save metrics to file
+            if output_file_path is None:
+                output_file_path = f"{column_name1}_{column_name2}_similarity.txt"
+            
+            os.makedirs(os.path.dirname(output_file_path) or '.', exist_ok=True)
+            with open(output_file_path, 'w') as f:
+                for key, value in metrics_dict.items():
+                    f.write(f"{key}: {value}\n")
+            
+            print(f"✅ Metrics saved to: {output_file_path}")
+            
+            return metrics_dict
         
         return self.get_dataframe()
         

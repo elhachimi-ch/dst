@@ -849,13 +849,61 @@ class ParquetIterableDS(IterableDataset):
 
 
 class Model:
+    @staticmethod
+    def _train_test_split_balanced_test(x, y, train_size, random_state=42):
+        """Split data, then undersample the test set to equal per-class counts."""
+        test_size = 1 - train_size
+        x_train, x_test, y_train, y_test = train_test_split(
+            x,
+            y,
+            train_size=train_size,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y,
+        )
+
+        if hasattr(y_test, "value_counts"):
+            class_counts = y_test.value_counts()
+        else:
+            y_arr = np.asarray(y_test)
+            _, counts = np.unique(y_arr, return_counts=True)
+            class_counts = pd.Series(counts, index=np.unique(y_arr))
+
+        min_count = int(class_counts.min())
+        if min_count <= 0:
+            raise ValueError(
+                "Test split contains a class with zero samples; cannot balance classes."
+            )
+
+        rng = np.random.default_rng(random_state)
+        balanced_idx = []
+        for cls in class_counts.index:
+            if hasattr(y_test, "index"):
+                cls_idx = y_test.index[y_test == cls].to_numpy()
+            else:
+                cls_idx = np.flatnonzero(np.asarray(y_test) == cls)
+            chosen = rng.choice(cls_idx, size=min_count, replace=False)
+            balanced_idx.extend(chosen)
+
+        rng.shuffle(balanced_idx)
+
+        if hasattr(x_test, "loc"):
+            x_test = x_test.loc[balanced_idx]
+            y_test = y_test.loc[balanced_idx]
+        else:
+            x_test = x_test[balanced_idx]
+            y_test = y_test[balanced_idx]
+
+        return x_train, x_test, y_train, y_test
+
     def __init__(
         self, 
         data_x=None, 
         data_y=None, 
         model_name='catboost', 
         task='r',
-        training_percent=0.8, 
+        training_percent=0.8,
+        balanced_classes_in_test=True,
         batch_size=32, 
         generator=None,
         validation_percentage=0.2,
@@ -874,7 +922,7 @@ class Model:
         n_workers: int | str = 'auto',
         multi_gpu: bool = False,
         all_gpu: bool = True,
-        tabpfn_version='v2',
+        tabpfn_version='v3',
         **kwargs
         ):
         """_summary_
@@ -922,9 +970,11 @@ class Model:
         self.reading_mode = reading_mode
         self.output_metrics_dir = output_metrics_dir
         self.train_percent = training_percent
+        self.balanced_classes_in_test = balanced_classes_in_test
         self.__y_pred = None
         self.__batch_size = batch_size
-        self.model_name  = model_name 
+        self.model_name  = model_name
+        self.__model = None  # Initialize to None, will be set by model type or load_model()
         self.__boosted_model = None
         self.__generator = generator
         self.history = None
@@ -940,6 +990,7 @@ class Model:
         self.__x_test = None
         self.__y_train = None
         self.__y_test = None
+        self._example_vector_printed_flags = set()
         
         if scaler_x_name == 'minmax':
             self.scaler_x = MinMaxScaler()
@@ -996,11 +1047,22 @@ class Model:
             else:
                 raise ValueError("parquet_batches_data provided but no 'train_loader' found or iterable given.")
         elif self.reading_mode == "dataframe":
-            if training_percent != 1:
-                self.__x_train, self.__x_test, self.__y_train, self.__y_test = train_test_split(self.x, 
-                                                                                            self.y,
-                                                                                            train_size=training_percent,
-                                                                                            test_size=1-training_percent)
+            if self.x is not None and training_percent != 1:
+                if self.__task == 'c' and self.balanced_classes_in_test:
+                    self.__x_train, self.__x_test, self.__y_train, self.__y_test = (
+                        Model._train_test_split_balanced_test(
+                            self.x,
+                            self.y,
+                            train_size=training_percent,
+                        )
+                    )
+                else:
+                    self.__x_train, self.__x_test, self.__y_train, self.__y_test = train_test_split(
+                        self.x,
+                        self.y,
+                        train_size=training_percent,
+                        test_size=1 - training_percent,
+                    )
                 
         elif self.reading_mode == "file_path":
             if training_percent != 1:
@@ -1098,7 +1160,7 @@ class Model:
             if task == 'c':
                 self.__model = GradientBoostingClassifier()
             else:
-                self.__model = GradientBoostingRegressor() 
+                self.__model = GradientBoostingRegressor()
             
         elif model_name  == 'tabformer':
             # Initialize TabFormer model
@@ -1153,18 +1215,36 @@ class Model:
             except ImportError:
                 raise ImportError("tabpfn not installed. Run: pip install tabpfn")
 
-            # Optional: user can pass tabpfn_version='v2' in kwargs
-            tabpfn_version = kwargs.pop("tabpfn_version", None)
+            if "device" not in kwargs:
+                if self.use_gpu:
+                    if torch.cuda.is_available():
+                        kwargs["device"] = "cuda"
+                    else:
+                        print(
+                            "WARNING: use_gpu=True but CUDA is not available. "
+                            "TabPFN will run on CPU."
+                        )
+                else:
+                    kwargs["device"] = "cpu"
+
+            tabpfn_version = kwargs.pop("tabpfn_version", tabpfn_version)
             if task == 'c':
                 if tabpfn_version == 'v2':
                     self.__model = TabPFNClassifier.create_default_for_version(ModelVersion.V2, **kwargs)
+                elif tabpfn_version == 'v3':
+                    self.__model = TabPFNClassifier.create_default_for_version(ModelVersion.V3, **kwargs)
                 else:
                     self.__model = TabPFNClassifier(**kwargs)  # default (2.5 weights)
             else:
                 if tabpfn_version == 'v2':
                     self.__model = TabPFNRegressor.create_default_for_version(ModelVersion.V2, **kwargs)
+                elif tabpfn_version == 'v3':
+                    self.__model = TabPFNRegressor.create_default_for_version(ModelVersion.V3, **kwargs)
                 else:
                     self.__model = TabPFNRegressor(**kwargs)   # default (2.5 weights)
+
+            if self.use_gpu and torch.cuda.is_available() and hasattr(self.__model, "to"):
+                self.__model.to(kwargs.get("device", "cuda"))
         
         else:
             self.__model = None
@@ -1231,6 +1311,78 @@ class Model:
     
     def set_model(self, model):
         self.__model = model
+
+    def _print_feature_vector_example(
+        self,
+        x_data,
+        feature_names=None,
+        context: str = "training",
+        once_key: str | None = None,
+        max_features_to_print: int = 60,
+    ):
+        """Print one sample feature vector to verify feature order and values."""
+        try:
+            if once_key is not None:
+                if once_key in self._example_vector_printed_flags:
+                    return
+
+            if x_data is None:
+                return
+
+            names = feature_names
+            row = None
+
+            if hasattr(x_data, "iloc"):
+                if len(x_data) == 0:
+                    return
+                row_obj = x_data.iloc[0]
+                if hasattr(row_obj, "to_numpy"):
+                    row = row_obj.to_numpy()
+                else:
+                    row = np.asarray(row_obj)
+                if names is None and hasattr(x_data, "columns"):
+                    names = list(x_data.columns)
+            elif torch.is_tensor(x_data):
+                if x_data.numel() == 0:
+                    return
+                arr = x_data.detach().cpu().numpy()
+                row = arr if arr.ndim == 1 else arr[0]
+            else:
+                arr = np.asarray(x_data)
+                if arr.size == 0:
+                    return
+                row = arr if arr.ndim == 1 else arr[0]
+
+            row = np.asarray(row).reshape(-1)
+            n_features = int(row.shape[0])
+
+            if names is None:
+                names = getattr(self, "feature_names_", None)
+            if names is None or len(names) != n_features:
+                names = [f"f{i}" for i in range(n_features)]
+
+            print(f"\n🔎 Example feature vector before {context}:")
+            print(f"   total_features={n_features}")
+
+            limit = min(n_features, int(max_features_to_print))
+            for i in range(limit):
+                v = row[i]
+                try:
+                    if np.issubdtype(type(v), np.number):
+                        v_str = f"{float(v):.6g}"
+                    else:
+                        v_str = str(v)
+                except Exception:
+                    v_str = str(v)
+                print(f"   [{i:03d}] {names[i]} = {v_str}")
+
+            if n_features > limit:
+                print(f"   ... ({n_features - limit} more features not shown)")
+
+            if once_key is not None:
+                self._example_vector_printed_flags.add(once_key)
+        except Exception as e:
+            print(f"⚠️ Could not print feature vector example ({context}): {e}")
     
     def add_layer(self, connections_number=2, activation_function='relu', input_dim=None):
         """Add a dense layer to the model architecture
@@ -1461,6 +1613,14 @@ class Model:
             return self.train_streaming_ml(
                 epochs=n_epochs,   
             )
+
+        train_preview_data = self.__x_train if self.__x_train is not None else self.x
+        self._print_feature_vector_example(
+            train_preview_data,
+            feature_names=getattr(self, "feature_names_", None),
+            context=f"training ({self.model_name})",
+            once_key="train_generic",
+        )
         
         if self.model_name  == 'dl':
             if loss is None:
@@ -7450,11 +7610,11 @@ class Model:
         val_ratio: float | None = None,
         n_estimators: int = 32,
         subsample_samples: int = 10_000,
-        verbose: int = 1,
         output_metrics_dir: str | None = None,
         use_cpu_inference: bool = False,
         chunk_size: int = 65536,
         n_jobs: int = 1,
+        early_stop_after_n_itiration: int | None = None,
     ):
         """
         Streaming trainer using TabPFN subsampled ensemble (no RF wrapper).
@@ -7465,6 +7625,12 @@ class Model:
         Artifacts:
         - Saves model to best_tabpfn_subsample_streaming.pkl
         - Saves metrics to tabpfn_subsample_streaming_history.csv
+
+        Parameters
+        ----------
+        early_stop_after_n_itiration : int, optional
+            If provided (>0), caps the effective number of TabPFN estimators
+            used in this run to allow earlier stopping.
         """
         # Prefer tabpfn_extensions for the Regressor; fall back to tabpfn for classifier
         try:
@@ -7533,13 +7699,18 @@ class Model:
         else:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio=None")
 
-        # First split: train+val vs test
-        trainval_indices, test_indices = train_test_split(
-            all_indices,
-            train_size=tr_ratio,
-            random_state=42,
-            shuffle=True,
-        )
+        # First split: train+val vs test (skip only test split when training on all data)
+        if tr_ratio >= 1.0:
+            trainval_indices = all_indices
+            test_indices = np.array([], dtype=np.int64)
+            print("🔀 Using 100% of data for train+val (no test split)")
+        else:
+            trainval_indices, test_indices = train_test_split(
+                all_indices,
+                train_size=tr_ratio,
+                random_state=42,
+                shuffle=True,
+            )
 
         # Second split: only if validation explicitly requested
         if use_val:
@@ -7607,6 +7778,13 @@ class Model:
         X_val, y_val = collect(val_indices, "Loading val data")
         X_test, y_test = collect(test_indices, "Loading test data")
 
+        self._print_feature_vector_example(
+            X_train,
+            feature_names=feature_cols,
+            context="training (tabpfn_streaming_subsampling)",
+            once_key="train_tabpfn_streaming_subsampling",
+        )
+
         # Task type
         is_classification = str(getattr(self, "_Model__task", self.__task)).lower().startswith("c")
 
@@ -7637,10 +7815,23 @@ class Model:
                 y_test = y_test.astype(np.float32, copy=False)
 
         # Build subsampled ensemble
+        effective_n_estimators = int(n_estimators)
+        if (
+            early_stop_after_n_itiration is not None
+            and int(early_stop_after_n_itiration) > 0
+        ):
+            effective_n_estimators = min(
+                effective_n_estimators, int(early_stop_after_n_itiration)
+            )
+            print(
+                f"⏹️  Early-stop cap active: using {effective_n_estimators} "
+                f"estimators (requested={int(n_estimators)})."
+            )
+
         if is_classification:
             model = TabPFNClassifier(
                 ignore_pretraining_limits=True,
-                n_estimators=int(n_estimators),
+                n_estimators=effective_n_estimators,
                 inference_config={"SUBSAMPLE_SAMPLES": int(subsample_samples)},
             )
         else:
@@ -7650,7 +7841,7 @@ class Model:
                 )
             model = TabPFNRegressor(
                 ignore_pretraining_limits=True,
-                n_estimators=int(n_estimators),
+                n_estimators=effective_n_estimators,
                 inference_config={"SUBSAMPLE_SAMPLES": int(subsample_samples)},
                 #memory_saving_mode=True,
                 fit_mode="fit_preprocessors",
@@ -7658,17 +7849,20 @@ class Model:
             )
 
         # Save fitted TabPFN model and reload for inference
-        model_fit_path = os.path.join(output_metrics_dir, "best_tabpfn_subsample_streaming.tabpfn_fit")
-        
-        if os.path.exists(model_fit_path):
-            print(f"ℹ️  Found existing fitted model at {model_fit_path}, loading it.")
+        from glob import glob
+        model_glob = os.path.join(output_metrics_dir, f"{(self.model_name or 'model').lower()}_*\.tabpfn_fit")
+        existing_models = sorted(glob(model_glob), key=os.path.getmtime)
+        latest_model_path = existing_models[-1] if existing_models else None
+
+        if latest_model_path and os.path.exists(latest_model_path):
+            print(f"ℹ️  Found existing fitted model at {latest_model_path}, loading it.")
             if use_cpu_inference:
                 print("⚙️  Using CPU for inference as requested.")
                 self.use_gpu = False  # force CPU for inference
             else:                
                 print("⚙️  Using GPU for inference if available.")
             
-            self.load_model(model_fit_path)
+            self.load_model(latest_model_path)
         else:
             print(f"🔧 Fitting TabPFN subsampled ensemble ({n_estimators} est.)")
             # Fit with a simple training phase bar
@@ -7677,7 +7871,7 @@ class Model:
             train_phase.update(1)
             train_phase.close()
             self.__model = model
-            self.save_model(model_fit_path)
+            self.save_model()
 
         # Metrics
         history = []
@@ -7702,7 +7896,13 @@ class Model:
 
             history.append({
                 "task": "classification",
-                "n_estimators": int(n_estimators),
+                "n_estimators": effective_n_estimators,
+                "requested_n_estimators": int(n_estimators),
+                "early_stop_after_n_itiration": (
+                    int(early_stop_after_n_itiration)
+                    if early_stop_after_n_itiration is not None
+                    else None
+                ),
                 "subsample_samples": int(subsample_samples),
                 "train_acc": tr_acc,
                 "train_f1_macro": tr_f1,
@@ -7749,7 +7949,13 @@ class Model:
 
             history.append({
                 "task": "regression",
-                "n_estimators": int(n_estimators),
+                "n_estimators": effective_n_estimators,
+                "requested_n_estimators": int(n_estimators),
+                "early_stop_after_n_itiration": (
+                    int(early_stop_after_n_itiration)
+                    if early_stop_after_n_itiration is not None
+                    else None
+                ),
                 "subsample_samples": int(subsample_samples),
                 "val_rmse": val_rmse,
                 "val_r2": val_r2,
@@ -7761,6 +7967,199 @@ class Model:
             })
 
         hist_path = os.path.join(output_metrics_dir, "tabpfn_subsample_streaming_history.csv")
+        pd.DataFrame(history).to_csv(hist_path, index=False)
+        print(f"✓ Saved training history -> {hist_path}")
+
+        return history
+
+
+    def train_tabpfn_subsampling(
+        self,
+        *,
+        n_estimators: int = 32,
+        subsample_samples: int = 10_000,
+        output_metrics_dir: str | None = None,
+        use_cpu_inference: bool = False,
+        chunk_size: int = 65536,
+        n_jobs: int = 1,
+    ):
+        """
+        Train a TabPFN subsampled ensemble from in-memory data (self.x, self.y).
+        Uses same data split as in __init__: train_test_split with train_percent.
+
+        Supports:
+        - regression ('r') via TabPFNRegressor
+        - classification ('c') via TabPFNClassifier
+        """
+        try:
+            from tabpfn_extensions import TabPFNRegressor, TabPFNClassifier
+        except Exception:
+            try:
+                from tabpfn import TabPFNClassifier
+                TabPFNRegressor = None
+            except Exception as e:
+                raise ImportError(
+                    f"TabPFN not available: {e}. Install 'tabpfn_extensions' (preferred) or 'tabpfn'."
+                )
+
+        import os
+        import numpy as np
+        import pandas as pd
+        from tqdm.auto import tqdm
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, f1_score
+
+        # Ensure data is available
+        if self.x is None or self.y is None:
+            raise ValueError("self.x and self.y must be loaded. Load data during initialization.")
+
+        if output_metrics_dir is None:
+            output_metrics_dir = getattr(self, "output_metrics_dir", "./model") or "./model"
+        os.makedirs(output_metrics_dir, exist_ok=True)
+
+        # Use same split as __init__: train_test_split with train_percent
+        if self.train_percent != 1:
+            X_train, X_test, y_train, y_test = train_test_split(
+                self.x, self.y,
+                train_size=self.train_percent,
+                test_size=1 - self.train_percent
+            )
+        else:
+            X_train = np.asarray(self.x, dtype=np.float32)
+            y_train = np.asarray(self.y, dtype=np.float32)
+            X_test = None
+            y_test = None
+
+        print(f"📊 Total rows: {len(X_train):,} train, {len(X_test) if X_test is not None else 0:,} test | Features: {X_train.shape[1]}")
+
+        # Task type
+        is_classification = str(getattr(self, "_Model__task", self.__task)).lower().startswith("c")
+
+        # Prepare y dtype
+        if is_classification:
+            if not np.issubdtype(y_train.dtype, np.integer):
+                y_train, classes = pd.factorize(y_train)
+                y_train = y_train.astype(np.int64, copy=False)
+                if y_test is not None:
+                    y_test = pd.Categorical(y_test, categories=classes).codes.astype(np.int64, copy=False)
+                self.class_names_ = [str(c) for c in classes]
+            else:
+                y_train = y_train.astype(np.int64, copy=False)
+                if y_test is not None:
+                    y_test = y_test.astype(np.int64, copy=False)
+        else:
+            y_train = y_train.astype(np.float32, copy=False)
+            if y_test is not None:
+                y_test = y_test.astype(np.float32, copy=False)
+
+        # Build subsampled ensemble
+        if is_classification:
+            model = TabPFNClassifier(
+                ignore_pretraining_limits=True,
+                n_estimators=int(n_estimators),
+                inference_config={"SUBSAMPLE_SAMPLES": int(subsample_samples)},
+            )
+        else:
+            if TabPFNRegressor is None:
+                raise ImportError(
+                    "TabPFNRegressor not found. Install 'tabpfn_extensions' to use regression subsampled ensemble."
+                )
+            model = TabPFNRegressor(
+                ignore_pretraining_limits=True,
+                n_estimators=int(n_estimators),
+                inference_config={"SUBSAMPLE_SAMPLES": int(subsample_samples)},
+                fit_mode="fit_preprocessors",
+                n_preprocessing_jobs=n_jobs,
+            )
+
+        # Store train/test in internal buffers (aligned with __init__)
+        self.__x_train = X_train.astype(np.float32)
+        self.__y_train = y_train
+        self.__x_test = X_test.astype(np.float32) if X_test is not None else None
+        self.__y_test = y_test
+
+        self.__model = model
+        if use_cpu_inference:
+            self.use_gpu = False
+
+        # Fit logic mirrors `train()`
+        print(f"🔧 Fitting TabPFN subsampled ensemble ({n_estimators} est.)")
+        train_phase = tqdm(total=1, desc=f"Training TabPFN ({n_estimators} est.)", position=0, unit="phase")
+        if self.train_percent == 1:
+            self.__model.fit(self.x, self.y)
+            fit_X, fit_y = self.x, self.y
+            self.__y_pred = None
+        else:
+            self.__model.fit(self.__x_train, self.__y_train)
+            fit_X, fit_y = self.__x_train, self.__y_train
+            if self.__x_test is not None and len(self.__x_test) > 0:
+                self.__y_pred = self.__model.predict(self.__x_test)
+            else:
+                self.__y_pred = None
+        train_phase.update(1)
+        train_phase.close()
+
+        # Metrics
+        history = []
+        if is_classification:
+            y_tr_pred = self.__model.predict(fit_X)
+            tr_acc = float(accuracy_score(fit_y, y_tr_pred))
+            tr_f1 = float(f1_score(fit_y, y_tr_pred, average="macro"))
+
+            test_acc = test_f1 = None
+            if X_test is not None:
+                y_test_pred = self.__model.predict(X_test)
+                test_acc = float(accuracy_score(y_test, y_test_pred))
+                test_f1 = float(f1_score(y_test, y_test_pred, average="macro"))
+                self.y_test = y_test
+                self.y_test_pred = y_test_pred
+
+            history.append({
+                "task": "classification",
+                "n_estimators": int(n_estimators),
+                "subsample_samples": int(subsample_samples),
+                "train_acc": tr_acc,
+                "train_f1_macro": tr_f1,
+                "test_acc": test_acc,
+                "test_f1_macro": test_f1,
+                "train_rows": int(len(y_train)),
+                "test_rows": int(len(y_test)) if y_test is not None else 0,
+            })
+        else:
+            def _predict_with_tqdm(X, desc: str, pred_chunk_size: int = chunk_size):
+                n = len(X)
+                if n == 0:
+                    return np.array([], dtype=np.float32)
+                preds = []
+                for i in tqdm(range(0, n, pred_chunk_size), desc=desc, unit="rows", position=0):
+                    xb = X[i:i + pred_chunk_size]
+                    pb = self.predict(xb)
+                    pb = np.asarray(pb)
+                    if pb.ndim > 1 and pb.shape[-1] == 1:
+                        pb = pb.reshape(-1)
+                    preds.append(pb)
+                return np.concatenate(preds, axis=0)
+
+            test_rmse = test_r2 = None
+            if X_test is not None:
+                y_test_pred = _predict_with_tqdm(X_test, "Predict test")
+                test_mse = mean_squared_error(y_test, y_test_pred)
+                test_rmse = float(np.sqrt(test_mse))
+                test_r2 = float(r2_score(y_test, y_test_pred))
+                self.y_test = y_test
+                self.y_test_pred = y_test_pred
+
+            history.append({
+                "task": "regression",
+                "n_estimators": int(n_estimators),
+                "subsample_samples": int(subsample_samples),
+                "test_rmse": test_rmse,
+                "test_r2": test_r2,
+                "train_rows": int(len(y_train)),
+                "test_rows": int(len(y_test)) if y_test is not None else 0,
+            })
+
+        hist_path = os.path.join(output_metrics_dir, "tabpfn_subsample_history.csv")
         pd.DataFrame(history).to_csv(hist_path, index=False)
         print(f"✓ Saved training history -> {hist_path}")
 
@@ -7777,6 +8176,7 @@ class Model:
         iterations: int = 2000,
         depth: int = 8,
         lr: float = 0.03,
+        early_stop_after_n_itiration: int | None = None,
         output_metrics_dir: str | None = None,
         show_progress: bool = True,
     ):
@@ -7787,6 +8187,12 @@ class Model:
         - Stream row-groups to materialize (X, y) splits.
         - Fit an XGBoost Reg/Clf with optional early stopping when validation exists.
         - Save per-iteration metrics CSV, store test predictions for regression.
+
+        Parameters
+        ----------
+        early_stop_after_n_itiration : int, optional
+            XGBoost early stopping rounds. Effective only when validation
+            data is available (val_ratio > 0).
         """
         import os
         import numpy as np
@@ -7902,6 +8308,13 @@ class Model:
         X_val, y_val = _gather_by_indices(val_idx, "Load val") if val_idx.size > 0 else (None, None)
         X_test, y_test = _gather_by_indices(test_idx, "Load test") if test_idx.size > 0 else (None, None)
 
+        self._print_feature_vector_example(
+            X_train,
+            feature_names=feature_cols,
+            context="training (xgboost_streaming)",
+            once_key="train_xgboost_streaming",
+        )
+
         # Task detection
         is_classification = str(getattr(self, "_Model__task", getattr(self, "__task", "r"))).lower().startswith("c")
 
@@ -7975,6 +8388,26 @@ class Model:
         fit_kwargs = dict(verbose=show_progress)
         if eval_set:
             fit_kwargs["eval_set"] = eval_set
+        if (
+            early_stop_after_n_itiration is not None
+            and int(early_stop_after_n_itiration) > 0
+            and X_val is not None
+            and y_val is not None
+            and len(y_val) > 0
+        ):
+            fit_kwargs["early_stopping_rounds"] = int(early_stop_after_n_itiration)
+            print(
+                f"⏹️  XGBoost early stopping enabled: "
+                f"{int(early_stop_after_n_itiration)} rounds"
+            )
+        elif (
+            early_stop_after_n_itiration is not None
+            and int(early_stop_after_n_itiration) > 0
+        ):
+            print(
+                "⚠️  early_stop_after_n_itiration was provided but validation "
+                "set is unavailable (val_ratio is None/0). Ignoring it."
+            )
        
 
         model.fit(X_train, y_train, **fit_kwargs)
@@ -8467,7 +8900,7 @@ class Model:
         exclude_cols=None,
         log_every=10,
         early_stopping_patience=10,          
-        enable_tensorboard=True 
+        enable_tensorboard=True,
     ):
         """
         Full in‑RAM training on a single parquet file (non‑streaming) with:
@@ -8488,8 +8921,64 @@ class Model:
         if not hasattr(self, "feature_names_") or getattr(self, "x", None) is None or getattr(self, "y", None) is None:
             self._load_single_parquet_into_memory(target_col=target_col, exclude_cols=exclude_cols)
 
+        # ========== DISPLAY TRAINING CONFIGURATION ==========
+        print("\n" + "="*80)
+        print("🚀 TRAINING CONFIGURATION")
+        print("="*80)
+        
+        # Model and task info
+        print(f"\n📊 MODEL SETUP:")
+        print(f"  Model Type:          {self.model_name.upper()}")
+        print(f"  Task:                {'Classification' if self.__task == 'c' else 'Regression' if self.__task == 'r' else 'Time Series'}")
+        print(f"  Device:              {self.device}")
+        
+        # Features info
+        feature_count = len(self.feature_names_) if hasattr(self, 'feature_names_') else 'unknown'
+        print(f"\n📈 INPUT FEATURES ({feature_count}):")
+        if hasattr(self, 'feature_names_') and self.feature_names_:
+            feat_display = ', '.join(self.feature_names_[:10])
+            if len(self.feature_names_) > 10:
+                feat_display += f", ... (+{len(self.feature_names_) - 10} more)"
+            print(f"  ├─ {feat_display}")
+        
+        # Target info
+        print(f"\n🎯 TARGET VARIABLE:")
+        print(f"  Column:              {target_col}")
+        if self.y is not None:
+            print(f"  Shape:               {self.y.shape}")
+            print(f"  Data Type:           {self.y.dtype}")
+            if hasattr(self.y, 'min'):
+                print(f"  Range:               [{self.y.min():.4f}, {self.y.max():.4f}]")
+                print(f"  Mean:                {self.y.mean():.4f}")
+                print(f"  Std:                 {self.y.std():.4f}")
+        
+        # Data split info
+        print(f"\n📦 DATA SPLIT:")
+        if self.__x_train is not None:
+            print(f"  Training Set:        {self.__x_train.shape[0]:,} samples")
+        if self.__x_test is not None:
+            print(f"  Test Set:            {self.__x_test.shape[0]:,} samples")
+        if self.x is not None:
+            print(f"  Total Samples:       {self.x.shape[0]:,} samples")
+        print(f"  Train/Test Split:    {int(self.train_percent * 100)}% / {int((1-self.train_percent) * 100)}%")
+        
+        # Training hyperparameters
+        if self.model_name == 'tabformer':
+            print(f"\n⚙️  TRAINING PARAMETERS:")
+            print(f"  Epochs:              {n_epochs}")
+            print(f"  Learning Rate:       {lr}")
+            print(f"  Batch Size:          {self.__batch_size}")
+            print(f"  Early Stopping:      {early_stopping_patience} epochs")
+            print(f"  Validation Split:    {int(self.validation_percentage * 100)}%")
+        else:
+            print(f"\n⚙️  TRAINING PARAMETERS:")
+            print(f"  Model:               {self.model_name.upper()} (direct training, no early stopping)")
+        
+        print("="*80 + "\n")
+        
         # Non-tabformer: just fit (no early stopping logic)
         if self.model_name != 'tabformer':
+            
             if self.train_percent == 1:
                 self.__model.fit(self.x, self.y)
             else:
@@ -9725,8 +10214,44 @@ class Model:
         print(self.__model.summary())
         
     # banary classification
-    def predict(self, x_to_pred):
-        return self.__model.predict(x_to_pred)
+    def predict(self, x_to_pred, batch_size=None, show_progress=True):
+        from tqdm import tqdm
+        import numpy as np
+
+        self._print_feature_vector_example(
+            x_to_pred,
+            feature_names=getattr(self, "feature_names_", None),
+            context="inference",
+            once_key="predict",
+        )
+
+        if batch_size is None or batch_size <= 0:
+            try:
+                batch_size = len(x_to_pred)
+            except Exception:
+                batch_size = None
+
+        if batch_size is None:
+            return self.__model.predict(x_to_pred)
+
+        n_rows = len(x_to_pred)
+        if n_rows == 0:
+            return self.__model.predict(x_to_pred)
+
+        preds = []
+        iterator = range(0, n_rows, batch_size)
+        for start in tqdm(iterator, desc="Predict", disable=not show_progress):
+            end = min(start + batch_size, n_rows)
+            if hasattr(x_to_pred, "iloc"):
+                batch = x_to_pred.iloc[start:end]
+            else:
+                batch = x_to_pred[start:end]
+            preds.append(self.__model.predict(batch))
+
+        try:
+            return np.concatenate(preds, axis=0)
+        except Exception:
+            return np.array(preds)
     
     def forcast_next_step(self, window):
         current_batch = window.reshape((1, window.shape[0], 1))
@@ -10235,7 +10760,7 @@ class Model:
         return self.__boosted_model.predict(x_to_pred)
 
     
-    def save_model(self, file_path="data/geoai_model"):
+    def save_model(self):
         """
         Save the trained model instance for future use.
 
@@ -10246,12 +10771,24 @@ class Model:
         • Other models: falls back to joblib.dump to save as a .pkl file.
 
         The file extension is automatically appended based on the model type.
+
+        The model is always saved under output_metrics_dir with a
+        model_name_datetimestamp filename.
         """
+        
         if self.__model is None:
             print("No model available to save.")
             return
 
-        name = (self.model_name or "").lower()
+        # Always save under output_metrics_dir with model_name_datetimestamp
+        output_dir = getattr(self, "output_metrics_dir", None) or "./model"
+        os.makedirs(output_dir, exist_ok=True)
+        model_name = (self.model_name or "model").lower()
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(output_dir, f"{model_name}_{timestamp}")
+
+        name = model_name
         if name == "tabformer":
             required_ext = ".pth"
         elif name == "catboost":
@@ -10262,9 +10799,7 @@ class Model:
             required_ext = ".pkl"
 
         # Append or adjust the file extension if necessary
-        base, ext = os.path.splitext(file_path)
-        if ext.lower() != required_ext:
-            file_path = base + required_ext
+        file_path = base + required_ext
 
         if name == "catboost":
             try:
@@ -10321,6 +10856,8 @@ class Model:
                 print(f"Model saved via joblib.dump to: {file_path}")
             except Exception as e:
                 print(f"Error saving model with joblib: {e}")
+        
+        return file_path  # Return the path where the model was saved for reference
     
     
     def save_model_v0(self, file_path="data/geoai_model"):
@@ -10455,9 +10992,9 @@ class Model:
         elif ext == ".tabpfn_fit":
             try:
                 from tabpfn.model_loading import load_fitted_tabpfn_model
-            except Exception as e:
-                print(f"TabPFN load API not available: {e}")
-                return
+            except ImportError as e:
+                raise RuntimeError(f"TabPFN library not available. Install with 'pip install tab-pfn': {e}")
+            
             # Choose device: use CPU by default; prefer CUDA if available and requested
             device = "cpu"
             try:
@@ -10466,15 +11003,99 @@ class Model:
                     device = "cuda"
             except Exception:
                 pass
+            
             try:
-                self.__model = load_fitted_tabpfn_model(file_path, device=device)
+                model = load_fitted_tabpfn_model(file_path, device=device)
+                if model is None:
+                    raise RuntimeError(f"load_fitted_tabpfn_model returned None for {file_path}")
+                self.__model = model
                 self.model_name = "tabpfn"
                 print(f"TabPFN fitted model loaded from: {file_path} (device={device})")
             except Exception as e:
-                print(f"Error loading TabPFN fitted model: {e}")
+                raise RuntimeError(f"Error loading TabPFN fitted model from {file_path}: {e}")
 
         else:
             print(f"Unsupported file extension: {ext}")
+
+    def get_model_structure(self):
+        """
+        Display and return the model's input/output structure information.
+        
+        Returns:
+            dict: Dictionary containing model structure info with keys:
+                - model_name: Name of the model
+                - task: Task type (regression/classification)
+                - input_features: List of input feature names
+                - num_input_features: Number of input features
+                - output_info: Information about output
+        """
+        # Get task type - handle both public and private access
+        task_type = self.__task if hasattr(self, '_Model__task') else "unknown"
+        
+        # Get feature names if available
+        feature_names = getattr(self, 'feature_names_', None)
+        num_features = len(feature_names) if feature_names else "unknown"
+        
+        # Try to get feature info from the underlying model if available
+        n_features_from_model = None
+        if hasattr(self.__model, 'n_features_in_'):
+            n_features_from_model = self.__model.n_features_in_
+        elif hasattr(self.__model, 'n_features'):
+            n_features_from_model = self.__model.n_features
+        
+        # Use model's feature count if we don't have feature names
+        if num_features == "unknown" and n_features_from_model:
+            num_features = n_features_from_model
+        
+        structure_info = {
+            "model_name": self.model_name,
+            "task": task_type,
+            "input_features": feature_names,
+            "num_input_features": num_features,
+            "output_info": None
+        }
+        
+        # Determine output info based on model type and task
+        if self.model_name.lower() in ['catboost', 'xgboost', 'random_forest']:
+            if task_type == 'c':
+                if hasattr(self.__model, 'classes_'):
+                    structure_info["output_info"] = f"Classification with {len(self.__model.classes_)} classes: {self.__model.classes_.tolist()}"
+                else:
+                    structure_info["output_info"] = "Classification output"
+            elif task_type == 'r':
+                structure_info["output_info"] = "Regression output (scalar per sample)"
+            else:
+                structure_info["output_info"] = "Model output"
+        elif self.model_name.lower() == 'tabpfn':
+            structure_info["output_info"] = "TabPFN output (learned prior-based predictions)"
+        elif self.model_name.lower() == 'tabformer':
+            structure_info["output_info"] = "TabFormer output (transformer-based)"
+        else:
+            structure_info["output_info"] = "Model output"
+        
+        # Display the structure nicely
+        print("\n" + "="*70)
+        print("📊 MODEL STRUCTURE INFORMATION")
+        print("="*70)
+        print(f"Model Type:         {self.model_name.upper()}")
+        print(f"Task:               {'Classification' if task_type == 'c' else 'Regression' if task_type == 'r' else 'Unknown'}")
+        
+        # Display feature information
+        if feature_names:
+            print(f"Input Features:     {num_features} features")
+            feature_display = ', '.join(feature_names[:5])
+            if len(feature_names) > 5:
+                feature_display += f", ... (+{len(feature_names) - 5} more)"
+            print(f"  ├─ {feature_display}")
+        elif isinstance(num_features, int):
+            print(f"Input Features:     {num_features} features (names not available)")
+        else:
+            print(f"Input Features:     Not yet determined (train the model to set feature names)")
+        
+        print(f"Output:             {structure_info['output_info']}")
+        print("="*70 + "\n")
+        
+        return structure_info
 
     def report(self):
         if self.model_name  == 'dl':
@@ -10918,7 +11539,7 @@ class Model:
             # ---------- IN-MEMORY PATH FOR CLASSIC ML MODELS ----------
             else:
                 # Use different metrics based on task type (classification vs regression)
-                from sklearn.model_selection import cross_val_score
+                from sklearn.model_selection import cross_val_score, cross_validate
                 import numpy as np
                 result = DataFrame()
                 
@@ -10929,29 +11550,34 @@ class Model:
                     # Stratified K-Fold with shuffling for classification
                     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
 
-                    accuracy_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='accuracy')
-                    result.add_column('Accuracy', accuracy_results)
-                    
                     unique_classes = np.unique(self.y)
                     if len(unique_classes) == 2:  # Binary classification
-                        precision_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='precision')
-                        recall_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='recall')
-                        f1_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='f1')
-                        roc_auc_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='roc_auc')
-                        
-                        result.add_column('Precision', precision_results)
-                        result.add_column('Recall', recall_results)
-                        result.add_column('F1', f1_results)
-                        result.add_column('ROC_AUC', roc_auc_results)
-                        
+                        scoring = {
+                            'accuracy': 'accuracy',
+                            'precision': 'precision',
+                            'recall': 'recall',
+                            'f1': 'f1',
+                            'roc_auc': 'roc_auc',
+                        }
+                        cv_scores = cross_validate(self.__model, self.x, self.y, cv=skf, scoring=scoring)
+                        result.add_column('Accuracy', cv_scores['test_accuracy'])
+                        result.add_column('Precision', cv_scores['test_precision'])
+                        result.add_column('Recall', cv_scores['test_recall'])
+                        result.add_column('F1', cv_scores['test_f1'])
+                        result.add_column('ROC_AUC', cv_scores['test_roc_auc'])
+
                     else:  # Multiclass classification
-                        precision_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='precision_weighted')
-                        recall_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='recall_weighted')
-                        f1_results = cross_val_score(self.__model, self.x, self.y, cv=skf, scoring='f1_weighted')
-                        
-                        result.add_column('Precision', precision_results)
-                        result.add_column('Recall', recall_results)
-                        result.add_column('F1', f1_results)
+                        scoring = {
+                            'accuracy': 'accuracy',
+                            'precision': 'precision_weighted',
+                            'recall': 'recall_weighted',
+                            'f1': 'f1_weighted',
+                        }
+                        cv_scores = cross_validate(self.__model, self.x, self.y, cv=skf, scoring=scoring)
+                        result.add_column('Accuracy', cv_scores['test_accuracy'])
+                        result.add_column('Precision', cv_scores['test_precision'])
+                        result.add_column('Recall', cv_scores['test_recall'])
+                        result.add_column('F1', cv_scores['test_f1'])
                 
                 else:  # Regression task (keep original code)
                     # K-Fold with shuffling for regression
@@ -10977,6 +11603,7 @@ class Model:
                 result.add_row(mean_row)
                 
                 result.show()
+                return result
 
     def best_model(self):
         pass
@@ -11632,7 +12259,49 @@ class Model:
                     shap_values = np.asarray(sv if not isinstance(sv, list) else sv[-1])
                     expected_value = getattr(explainer, "expected_value", None)
 
-            elif model_type in ("xgboost", "random_forest", "decision_tree", "gradient_boosting"):
+            elif model_type == "xgboost":
+                # Prefer native XGBoost SHAP contributions to avoid TreeExplainer
+                # shape/chunksize mismatches seen with some xgboost/shap versions.
+                X_s = np.ascontiguousarray(X_s, dtype=np.float32)
+                try:
+                    import xgboost as xgb
+
+                    # sklearn API models expose get_booster(); Booster works directly.
+                    booster = self.__model.get_booster() if hasattr(self.__model, "get_booster") else self.__model
+                    dmat = xgb.DMatrix(X_s, feature_names=[str(c) for c in feature_names])
+                    sv = booster.predict(dmat, pred_contribs=True, validate_features=False)
+                    sv = np.asarray(sv)
+
+                    # Regression/binary: [n_samples, n_features + 1]
+                    # Multiclass: [n_samples, n_classes, n_features + 1]
+                    if sv.ndim == 3:
+                        multiclass = True
+                        class_idx = 1 if sv.shape[1] == 2 else (sv.shape[1] - 1)
+                        shap_values = sv[:, class_idx, :-1]
+                        expected_value = float(np.mean(sv[:, class_idx, -1]))
+                    elif sv.ndim == 2:
+                        shap_values = sv[:, :-1]
+                        expected_value = float(np.mean(sv[:, -1]))
+                    else:
+                        raise RuntimeError(f"Unexpected pred_contribs shape: {sv.shape}")
+                except Exception:
+                    # Fallback to model-agnostic SHAP to avoid XGBoost internal
+                    # pred_contribs / TreeExplainer shape mismatch bugs on some builds.
+                    def f_pred(x):
+                        x = np.asarray(x, dtype=np.float32)
+                        return np.asarray(self.__model.predict(x)).reshape(-1)
+
+                    bg_for_kernel = shap.sample(X_bg, min(100, X_bg.shape[0]))
+                    explainer = shap.KernelExplainer(f_pred, bg_for_kernel)
+                    sv = explainer.shap_values(X_s, nsamples="auto")
+                    if isinstance(sv, list):
+                        multiclass = True
+                        shap_values = np.asarray(sv[-1])
+                    else:
+                        shap_values = np.asarray(sv)
+                    expected_value = getattr(explainer, "expected_value", None)
+
+            elif model_type in ("random_forest", "decision_tree", "gradient_boosting"):
                 explainer = shap.TreeExplainer(self.__model)
                 sv = explainer.shap_values(X_s)
                 # list -> multiclass
@@ -11705,6 +12374,56 @@ class Model:
         })
         mean_abs_csv = os.path.join(shap_dir, "mean_abs_shap.csv")
         mean_abs_df.to_csv(mean_abs_csv, index=False)
+        mean_abs_txt = os.path.join(shap_dir, "mean_abs_shap.txt")
+        with open(mean_abs_txt, "w", encoding="utf-8") as f:
+            f.write(mean_abs_df.to_string(index=False))
+            f.write("\n")
+
+        # -------- Classic model importance (non-SHAP), best-effort --------
+        model_imp_csv = None
+        model_imp_txt = None
+        try:
+            classic_scores = None
+
+            if hasattr(self.__model, "feature_importances_"):
+                classic_scores = np.asarray(self.__model.feature_importances_, dtype=np.float64).reshape(-1)
+
+            elif model_type == "xgboost":
+                # Use native XGBoost gain importance
+                booster = self.__model.get_booster() if hasattr(self.__model, "get_booster") else self.__model
+                raw_gain = booster.get_score(importance_type="gain")
+                classic_scores = np.zeros(len(feature_names), dtype=np.float64)
+                name_to_idx = {str(n): i for i, n in enumerate(feature_names)}
+                for k, v in raw_gain.items():
+                    if k in name_to_idx:
+                        classic_scores[name_to_idx[k]] = float(v)
+                    elif isinstance(k, str) and k.startswith("f") and k[1:].isdigit():
+                        j = int(k[1:])
+                        if 0 <= j < len(classic_scores):
+                            classic_scores[j] = float(v)
+
+            elif model_type == "catboost" and hasattr(self.__model, "get_feature_importance"):
+                classic_scores = np.asarray(
+                    self.__model.get_feature_importance(type="FeatureImportance"),
+                    dtype=np.float64
+                ).reshape(-1)
+
+            if classic_scores is not None and classic_scores.size == len(feature_names):
+                classic_order = np.argsort(-classic_scores)
+                model_imp_df = pd.DataFrame({
+                    "feature": [feature_names[i] for i in classic_order],
+                    "model_importance": classic_scores[classic_order]
+                })
+                model_imp_csv = os.path.join(shap_dir, "model_feature_importance.csv")
+                model_imp_df.to_csv(model_imp_csv, index=False)
+                model_imp_txt = os.path.join(shap_dir, "model_feature_importance.txt")
+                with open(model_imp_txt, "w", encoding="utf-8") as f:
+                    f.write(model_imp_df.to_string(index=False))
+                    f.write("\n")
+        except Exception:
+            # Keep SHAP pipeline robust even if classic importance is unavailable
+            model_imp_csv = None
+            model_imp_txt = None
 
         # Optionally save raw shap matrix
         shap_values_npy = None
@@ -11715,6 +12434,9 @@ class Model:
         # -------- Plots --------
         artifacts = {
             "mean_abs_csv": mean_abs_csv,
+            "mean_abs_txt": mean_abs_txt,
+            "model_importance_csv": model_imp_csv,
+            "model_importance_txt": model_imp_txt,
             "shap_values_npy": shap_values_npy,
             "summary_bar_png": None,
             "summary_dot_png": None,
@@ -11811,208 +12533,1024 @@ class Model:
 
         print(f"SHAP artifacts saved to: {shap_dir}")
         return artifacts
+
+    def xai(
+        self,
+        *,
+        features: list[str] | None = None,
+        target_col: str = "y",
+        exclude_cols: list[str] | None = None,
+        sample_rows: int = 5000,
+        background_size: int = 200,
+        top_k: int = 20,
+        grid_points: int = 20,
+        ice_count: int = 50,
+        output_dir: str | None = None,
+        save_raw: bool = True,
+        show: bool = False,
+        class_index: int | None = None,
+        random_state: int = 42,
+        chunk_size_pred: int = 10000,
+        # features_importance params
+        fi_features_nbr: int = 20,
+        fi_rotation: int = 45,
+    ) -> dict:
+        """
+        Run the full XAI pipeline and export combined reports.
+
+        This wrapper:
+          - creates an ``xai`` root folder,
+          - creates ``feature_importance/`` subfolder, calls features_importance()
+            and exports PNG, CSV and TXT inside it,
+          - runs ``shap_xai()`` and ``pdp_ice_xai()``,
+          - writes combined JSON and TXT reports listing all artifacts.
+
+        When show=False all figures are saved but NOT displayed
+        (switches to non-interactive Agg backend to prevent Jupyter auto-display).
+
+        Returns
+        -------
+        dict
+            Combined artifact manifest.
+        """
+        import os
+        import json
+        import matplotlib
+        from pprint import pformat
+
+        # Suppress Jupyter auto-display when show=False
+        _original_backend = None
+        if not show:
+            _original_backend = matplotlib.get_backend()
+            matplotlib.use('Agg')
+            plt.ioff()
+
+        try:
+            out_dir = output_dir or getattr(self, "output_metrics_dir", "./results_monitor")
+            xai_dir = os.path.join(out_dir, "xai")
+            os.makedirs(xai_dir, exist_ok=True)
+
+            # ========== FEATURE IMPORTANCE SUBFOLDER ==========
+            fi_dir = os.path.join(xai_dir, "feature_importance")
+            os.makedirs(fi_dir, exist_ok=True)
+
+            fi_png = None
+            fi_csv = None
+            fi_txt = None
+            fi_df  = None
+
+            try:
+                fi_png = os.path.join(fi_dir, f"feature_importance_{self.model_name}.png")
+
+                fi_df = self.features_importance(
+                    features_nbr=fi_features_nbr,
+                    savefig=True,
+                    figure_name=fi_png,
+                    rotation_angle_x_labels=fi_rotation,
+                    show=show,
+                )
+
+                # Export CSV
+                if fi_df is not None:
+                    fi_csv = os.path.join(fi_dir, f"feature_importance_{self.model_name}.csv")
+                    fi_df.to_csv(fi_csv, index=False)
+
+                    # Export TXT (human-readable table)
+                    fi_txt = os.path.join(fi_dir, f"feature_importance_{self.model_name}.txt")
+                    with open(fi_txt, "w", encoding="utf-8") as f:
+                        f.write("Feature Importance Report\n")
+                        f.write(f"Model  : {self.model_name}\n")
+                        f.write(f"Top-N  : {fi_features_nbr}\n")
+                        f.write("=" * 60 + "\n")
+                        f.write(fi_df.to_string(index=False))
+                        f.write("\n")
+
+                print(f"📊 Feature Importance PNG : {fi_png}")
+                print(f"📋 Feature Importance CSV : {fi_csv}")
+                print(f"📄 Feature Importance TXT : {fi_txt}")
+
+            except Exception as e:
+                print(f"⚠️  features_importance() failed: {e}")
+
+            # ========== SHAP XAI ==========
+            shap_artifacts = self.shap_xai(
+                target_col=target_col,
+                exclude_cols=exclude_cols,
+                sample_rows=sample_rows,
+                background_size=background_size,
+                top_k=top_k,
+                output_dir=xai_dir,
+                save_raw=save_raw,
+                show=show,
+                random_state=random_state,
+            )
+
+            # ========== PDP/ICE XAI ==========
+            pdp_ice_artifacts = self.pdp_ice_xai(
+                features=features,
+                top_k=top_k,
+                target_col=target_col,
+                exclude_cols=exclude_cols,
+                sample_rows=sample_rows,
+                grid_points=grid_points,
+                ice_count=ice_count,
+                output_dir=xai_dir,
+                show=show,
+                class_index=class_index,
+                random_state=random_state,
+                chunk_size_pred=chunk_size_pred,
+            )
+
+            plt.close('all')
+
+            # ========== COMBINED MANIFEST ==========
+            artifacts = {
+                "xai_dir": xai_dir,
+                "feature_importance": {
+                    "dir": fi_dir,
+                    "png": fi_png,
+                    "csv": fi_csv,
+                    "txt": fi_txt,
+                },
+                "shap": shap_artifacts,
+                "pdp_ice": pdp_ice_artifacts,
+            }
+
+            # ========== REPORTS ==========
+            report_json = os.path.join(xai_dir, "xai_report.json")
+            with open(report_json, "w", encoding="utf-8") as f:
+                json.dump(artifacts, f, indent=2, ensure_ascii=False, default=str)
+
+            report_txt = os.path.join(xai_dir, "xai_report.txt")
+            with open(report_txt, "w", encoding="utf-8") as f:
+                f.write("=" * 80 + "\n")
+                f.write("XAI REPORT\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"Root folder : {xai_dir}\n")
+                f.write(f"Show figures: {show}\n\n")
+                f.write("FEATURE IMPORTANCE\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"  Folder : {fi_dir}\n")
+                f.write(f"  PNG    : {fi_png}\n")
+                f.write(f"  CSV    : {fi_csv}\n")
+                f.write(f"  TXT    : {fi_txt}\n\n")
+                f.write("SHAP artifacts\n")
+                f.write("-" * 80 + "\n")
+                f.write(pformat(shap_artifacts))
+                f.write("\n\nPDP/ICE artifacts\n")
+                f.write("-" * 80 + "\n")
+                f.write(pformat(pdp_ice_artifacts))
+                f.write("\n")
+
+            artifacts["report_json"] = report_json
+            artifacts["report_txt"]  = report_txt
+
+            print(f"\n✅ XAI complete! All artifacts → {xai_dir}")
+            if not show:
+                print("💾 show=False → all figures exported only (not displayed).\n")
+
+            return artifacts
+
+        finally:
+            # Restore original backend so subsequent notebook cells work normally
+            if not show and _original_backend is not None:
+                plt.close('all')
+                try:
+                    matplotlib.use(_original_backend)
+                except Exception:
+                    pass
+                plt.ion()
     
     
-    def features_importance(self, 
+    def xai_heat_maps(
+        self,
+        input_root: str,
+        output_dir: Optional[str] = None,
+        ipcc_regions: Optional[Sequence[str]] = None,
+        feature_name_map: Optional[Dict[str, str]] = None,
+        shap_prefix: str = "mean_abs_shap_",
+        fi_prefix: str = "model_feature_importance_",
+        xgb_folder_name: str = "xgboost",
+        cat_folder_name: str = "catboost",
+        dpi: int = 300,
+        figsize_main: tuple = (16, 11),
+        figsize_agreement: tuple = (12, 5),
+        cmap_rank: str = "Blues_r",
+        cmap_agreement: str = "RdBu_r",
+        rank_font_family: str = "DejaVu Sans",
+        rank_font_size: int = 8,
+        rank_font_color: str = "black",
+        x_y_labels_font_size: int = 10,
+        plot_title: bool = True,
+        show: bool = False,
+    ):
+        """
+        Generate:
+        1) 4-panel rank heatmaps:
+           - XGBoost SHAP rank
+           - XGBoost model feature importance rank
+           - CatBoost SHAP rank
+           - CatBoost model feature importance rank
+
+        2) Rank-agreement heatmaps:
+           - XGBoost: model rank - SHAP rank
+           - CatBoost: model rank - SHAP rank
+
+        Expected files:
+            xgboost/mean_abs_shap_caf.csv
+            xgboost/model_feature_importance_caf.csv
+            ...
+            catboost/mean_abs_shap_caf.csv
+            catboost/model_feature_importance_caf.csv
+            ...
+
+        CSV schema:
+            SHAP CSV:
+                feature,mean_abs_shap
+            FI CSV:
+                feature,model_importance
+        """
+
+        if ipcc_regions is None:
+            ipcc_regions = ["caf", "neaf", "waf", "seaf", "med", "sah", "esaf", "wsaf", "mdg"]
+
+        if feature_name_map is None:
+            feature_name_map = {
+                "ws_mean_aligned_ws_mean": "Ws",
+                "rs_sum_mj_aligned_rs_sum_mj": "Rs",
+                "ta_max_celsius_aligned_ta_max_celsius": "Ta_max",
+                "ta_min_celsius_aligned_ta_min_celsius": "Ta_min",
+                "rh_min_aligned_rh_min": "RH_min",
+                "rh_max_aligned_rh_max": "RH_max",
+            }
+
+        input_root = Path(input_root)
+        xgb_dir = input_root / xgb_folder_name
+        cat_dir = input_root / cat_folder_name
+
+        if output_dir is None:
+            output_dir = self.results_monitoring_folder / "xai_heatmaps"
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        def _rename_feature(feat: str) -> str:
+            return feature_name_map.get(feat, feat)
+
+        def _load_shap_csv(path: Path) -> pd.Series:
+            if not path.exists():
+                raise FileNotFoundError(f"Missing file: {path}")
+            df = pd.read_csv(path)
+            required = {"feature", "mean_abs_shap"}
+            if not required.issubset(set(df.columns)):
+                raise ValueError(f"{path} must contain columns {required}, found {list(df.columns)}")
+            df["feature"] = df["feature"].astype(str).map(_rename_feature)
+            return pd.Series(df["mean_abs_shap"].values, index=df["feature"].values, dtype=float)
+
+        def _load_fi_csv(path: Path) -> pd.Series:
+            if not path.exists():
+                raise FileNotFoundError(f"Missing file: {path}")
+            df = pd.read_csv(path)
+            required = {"feature", "model_importance"}
+            if not required.issubset(set(df.columns)):
+                raise ValueError(f"{path} must contain columns {required}, found {list(df.columns)}")
+            df["feature"] = df["feature"].astype(str).map(_rename_feature)
+            return pd.Series(df["model_importance"].values, index=df["feature"].values, dtype=float)
+
+        def _collect_all_features(model_dir: Path):
+            feats = set()
+            for region in ipcc_regions:
+                shap_path = model_dir / f"{shap_prefix}{region}.csv"
+                fi_path = model_dir / f"{fi_prefix}{region}.csv"
+                if shap_path.exists():
+                    feats.update(_load_shap_csv(shap_path).index.tolist())
+                if fi_path.exists():
+                    feats.update(_load_fi_csv(fi_path).index.tolist())
+            return sorted(feats)
+
+        # collect full feature set
+        all_features = sorted(set(_collect_all_features(xgb_dir)) | set(_collect_all_features(cat_dir)))
+        if len(all_features) == 0:
+            raise RuntimeError("No features found across XGBoost/CatBoost folders.")
+
+        # Better publication order if present
+        preferred_order = ["Rs", "Ws", "Tmax", "Tmin", "RHmin", "RHmax"]
+        ordered_features = [f for f in preferred_order if f in all_features] + [f for f in all_features if f not in preferred_order]
+        all_features = ordered_features
+
+        def _rank_from_series(s: pd.Series) -> pd.Series:
+            # rank 1 = highest importance
+            s = s.reindex(all_features).fillna(-np.inf)
+            return s.rank(method="dense", ascending=False).astype(int)
+
+        def _build_rank_tables(model_dir: Path):
+            shap_rank_df = pd.DataFrame(index=[r.upper() for r in ipcc_regions], columns=all_features, dtype=float)
+            fi_rank_df = pd.DataFrame(index=[r.upper() for r in ipcc_regions], columns=all_features, dtype=float)
+
+            for region in ipcc_regions:
+                region_upper = region.upper()
+
+                shap_path = model_dir / f"{shap_prefix}{region}.csv"
+                fi_path = model_dir / f"{fi_prefix}{region}.csv"
+
+                shap_s = _load_shap_csv(shap_path)
+                fi_s = _load_fi_csv(fi_path)
+
+                shap_rank_df.loc[region_upper] = _rank_from_series(shap_s).values
+                fi_rank_df.loc[region_upper] = _rank_from_series(fi_s).values
+
+            return shap_rank_df.astype(int), fi_rank_df.astype(int)
+
+        def _build_weight_tables(model_dir: Path):
+            """Build raw weight (importance value) tables for each region."""
+            shap_wt_df = pd.DataFrame(index=[r.upper() for r in ipcc_regions], columns=all_features, dtype=float)
+            fi_wt_df   = pd.DataFrame(index=[r.upper() for r in ipcc_regions], columns=all_features, dtype=float)
+
+            for region in ipcc_regions:
+                region_upper = region.upper()
+                shap_path = model_dir / f"{shap_prefix}{region}.csv"
+                fi_path   = model_dir / f"{fi_prefix}{region}.csv"
+
+                shap_s = _load_shap_csv(shap_path).reindex(all_features).fillna(0.0)
+                fi_s   = _load_fi_csv(fi_path).reindex(all_features).fillna(0.0)
+
+                shap_wt_df.loc[region_upper] = shap_s.values
+                fi_wt_df.loc[region_upper]   = fi_s.values
+
+            return shap_wt_df.astype(float), fi_wt_df.astype(float)
+
+        xgb_shap_rank, xgb_fi_rank = _build_rank_tables(xgb_dir)
+        cat_shap_rank, cat_fi_rank = _build_rank_tables(cat_dir)
+
+        xgb_shap_wt, xgb_fi_wt = _build_weight_tables(xgb_dir)
+        cat_shap_wt, cat_fi_wt = _build_weight_tables(cat_dir)
+
+        # agreement = classical rank - SHAP rank
+        xgb_agreement = xgb_fi_rank - xgb_shap_rank
+        cat_agreement = cat_fi_rank - cat_shap_rank
+
+        # save csv tables
+        xgb_shap_rank.to_csv(output_dir / "xgboost_shap_rank.csv")
+        xgb_fi_rank.to_csv(output_dir / "xgboost_model_importance_rank.csv")
+        cat_shap_rank.to_csv(output_dir / "catboost_shap_rank.csv")
+        cat_fi_rank.to_csv(output_dir / "catboost_model_importance_rank.csv")
+        xgb_agreement.to_csv(output_dir / "xgboost_rank_agreement.csv")
+        cat_agreement.to_csv(output_dir / "catboost_rank_agreement.csv")
+        xgb_shap_wt.to_csv(output_dir / "xgboost_shap_weights.csv")
+        xgb_fi_wt.to_csv(output_dir / "xgboost_model_importance_weights.csv")
+        cat_shap_wt.to_csv(output_dir / "catboost_shap_weights.csv")
+        cat_fi_wt.to_csv(output_dir / "catboost_model_importance_weights.csv")
+
+        # -----------------------------
+        # plotting helpers
+        # -----------------------------
+        figsize_single = (figsize_main[0] / 2, figsize_main[1] / 2)
+
+        def _plot_weight_heatmap(weight_df: pd.DataFrame, rank_df: pd.DataFrame, title: str, filename: str, cbar_label: str):
+            """Single-figure heatmap colored by raw importance weights, annotated with ranks."""
+            fig, ax = plt.subplots(1, 1, figsize=figsize_single, dpi=dpi)
+            vals = weight_df.values.astype(float)
+            vmin, vmax = float(vals.min()), float(vals.max())
+            if vmin == vmax:
+                vmax = vmin + 1.0
+            im = ax.imshow(vals, aspect="auto", cmap=cmap_rank, vmin=vmin, vmax=vmax)
+
+            if plot_title:
+                ax.set_title(title, fontsize=12, pad=8)
+            ax.set_xticks(np.arange(weight_df.shape[1]))
+            ax.set_xticklabels(
+                weight_df.columns,
+                rotation=45,
+                ha="right",
+                fontsize=x_y_labels_font_size,
+                fontfamily=rank_font_family,
+            )
+            ax.set_yticks(np.arange(weight_df.shape[0]))
+            ax.set_yticklabels(
+                weight_df.index,
+                fontsize=x_y_labels_font_size,
+                fontfamily=rank_font_family,
+            )
+
+            for i in range(weight_df.shape[0]):
+                for j in range(weight_df.shape[1]):
+                    ax.text(
+                        j,
+                        i,
+                        f"{int(rank_df.iloc[i, j])}",
+                        ha="center",
+                        va="center",
+                        fontsize=rank_font_size,
+                        color=rank_font_color,
+                        fontfamily=rank_font_family,
+                    )
+
+            ax.set_xticks(np.arange(-0.5, weight_df.shape[1], 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, weight_df.shape[0], 1), minor=True)
+            ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+            ax.tick_params(which="minor", bottom=False, left=False)
+
+            cbar = fig.colorbar(im, ax=ax, shrink=0.86, pad=0.02)
+            cbar.set_label(cbar_label, fontsize=11)
+            fig.tight_layout()
+
+            out_path = output_dir / filename
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+            if show:
+                plt.show()
+            plt.close(fig)
+            print(f"✅ Saved: {out_path}")
+            return out_path
+
+        def _plot_agreement_heatmap_single(df: pd.DataFrame, title: str, filename: str):
+            """Single-figure rank-agreement heatmap."""
+            fig, ax = plt.subplots(1, 1, figsize=figsize_single, dpi=dpi)
+            vmax = int(np.abs(df.values).max())
+            vmax = max(vmax, 1)
+            im = ax.imshow(df.values, aspect="auto", cmap=cmap_agreement, vmin=-vmax, vmax=vmax)
+
+            if plot_title:
+                ax.set_title(title, fontsize=12, pad=8)
+            ax.set_xticks(np.arange(df.shape[1]))
+            ax.set_xticklabels(
+                df.columns,
+                rotation=45,
+                ha="right",
+                fontsize=x_y_labels_font_size,
+                fontfamily=rank_font_family,
+            )
+            ax.set_yticks(np.arange(df.shape[0]))
+            ax.set_yticklabels(
+                df.index,
+                fontsize=x_y_labels_font_size,
+                fontfamily=rank_font_family,
+            )
+
+            for i in range(df.shape[0]):
+                for j in range(df.shape[1]):
+                    ax.text(
+                        j,
+                        i,
+                        f"{int(df.iloc[i, j])}",
+                        ha="center",
+                        va="center",
+                        fontsize=rank_font_size,
+                        color=rank_font_color,
+                        fontfamily=rank_font_family,
+                    )
+
+            ax.set_xticks(np.arange(-0.5, df.shape[1], 1), minor=True)
+            ax.set_yticks(np.arange(-0.5, df.shape[0], 1), minor=True)
+            ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+            ax.tick_params(which="minor", bottom=False, left=False)
+
+            cbar = fig.colorbar(im, ax=ax, shrink=0.9, pad=0.02)
+            cbar.set_label("Rank difference", fontsize=11)
+            fig.tight_layout()
+
+            out_path = output_dir / filename
+            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+            if show:
+                plt.show()
+            plt.close(fig)
+            print(f"✅ Saved: {out_path}")
+            return out_path
+
+        # -----------------------------
+        # generate each chart separately (colors = weights)
+        # -----------------------------
+        _plot_weight_heatmap(xgb_shap_wt, xgb_shap_rank, "XGBoost SHAP importance",
+                             "xgboost_shap_heatmap.png",           "SHAP importance")
+        _plot_weight_heatmap(xgb_fi_wt,   xgb_fi_rank,   "XGBoost feature importance",
+                             "xgboost_fi_heatmap.png",             "Feature importance")
+        _plot_weight_heatmap(cat_shap_wt, cat_shap_rank, "CatBoost SHAP importance",
+                             "catboost_shap_heatmap.png",          "SHAP importance")
+        _plot_weight_heatmap(cat_fi_wt,   cat_fi_rank,   "CatBoost feature importance",
+                             "catboost_fi_heatmap.png",            "Feature importance")
+
+        _plot_agreement_heatmap_single(xgb_agreement,
+            "XGBoost rank agreement\n(feature importance − SHAP)",
+            "xgboost_rank_agreement_heatmap.png")
+        _plot_agreement_heatmap_single(cat_agreement,
+            "CatBoost rank agreement\n(feature importance − SHAP)",
+            "catboost_rank_agreement_heatmap.png")
+
+        return {
+            "xgb_shap_rank": xgb_shap_rank,
+            "xgb_fi_rank": xgb_fi_rank,
+            "cat_shap_rank": cat_shap_rank,
+            "cat_fi_rank": cat_fi_rank,
+            "xgb_shap_weights": xgb_shap_wt,
+            "xgb_fi_weights": xgb_fi_wt,
+            "cat_shap_weights": cat_shap_wt,
+            "cat_fi_weights": cat_fi_wt,
+            "xgb_rank_agreement": xgb_agreement,
+            "cat_rank_agreement": cat_agreement,
+        }
+    
+    
+    
+    
+    def features_importance(self,
                             features_nbr=10,
-                            method='cb',
                             savefig=False,
                             figure_name='output.png',
                             rotation_angle_x_labels=0,
                             x_label='Features',
                             y_label='Importance scores (%)',
-                            **kwargs
+                            show=True,
                             ):
-        """ show a bar chart of features importance and return a dataframe of the results
+        """Show a bar chart of feature importances using the already-trained model
+        and return a DataFrame of the results sorted in descending order.
+
+        Supports: CatBoost, XGBoost, Random Forest, Gradient Boosting,
+                  AdaBoost, Decision Tree, and any sklearn model with
+                  ``feature_importances_``.
 
         Args:
-            features_nbr (int, optional): _description_. Defaults to 10.
-            savefig (bool, optional): _description_. Defaults to False.
-            figure_name (str, optional): _description_. Defaults to 'output.png'.
+            features_nbr (int): Number of top features to display. Defaults to 10.
+            savefig (bool): Save the figure to ``figure_name``. Defaults to False.
+            figure_name (str): Output PNG path. Defaults to 'output.png'.
+            rotation_angle_x_labels (int): X-tick rotation angle. Defaults to 0.
+            x_label (str): X-axis label.
+            y_label (str): Y-axis label.
+            show (bool): Display the figure interactively. Defaults to True.
 
         Returns:
-            _type_: _description_
-        """    
-        
-        if method == 'cb':
-            from catboost import CatBoostRegressor, CatBoostClassifier
-            
-            if self.__task == 'r':
-                
-                model = CatBoostRegressor(**kwargs)
+            pd.DataFrame: Feature importances sorted descending.
+        """
+        model_type = (self.model_name or "").lower()
+        feature_names = None
+        importances   = None
 
-                model.fit(self.x, self.y)
-                
-                importances = model.get_feature_importance()
-                feature_names = self.x.columns
+        # ---- Extract importances from self.__model ----
+        if model_type == "catboost":
+            importances  = self.__model.get_feature_importance()
+            feature_names = list(self.x.columns)
 
-                # Create a DataFrame for better visualization
-                feature_importance_df = pd.DataFrame({'Feature': feature_names, 'Importance': importances})
+        elif model_type == "xgboost":
+            scores = self.__model.get_booster().get_score(importance_type='weight')
+            if not scores:
+                raise ValueError("XGBoost model has no feature scores — was it trained?")
+            feature_names = list(scores.keys())
+            importances   = [scores[f] for f in feature_names]
 
-                # Sort the DataFrame by importance
-                feature_importance_df.sort_values(by='Importance', ascending=False, inplace=True)
+        elif hasattr(self.__model, "feature_importances_"):
+            # sklearn tree ensembles: RandomForest, GradientBoosting, AdaBoost,
+            # DecisionTree, ExtraTrees, etc.
+            importances   = self.__model.feature_importances_
+            feature_names = list(self.x.columns) if hasattr(self.x, "columns") \
+                            else [f"f_{i}" for i in range(len(importances))]
 
-                print(feature_importance_df)
+        else:
+            raise NotImplementedError(
+                f"features_importance() does not support model '{self.model_name}'. "
+                "The model must expose feature_importances_ or be CatBoost/XGBoost."
+            )
 
+        # ---- Build Series and DataFrame ----
+        feature_imp = pd.Series(importances, index=feature_names)
+        data = DataFrame()
+        data.add_column('Importance', feature_imp)
+        data.sort(by_column_name_list=['Importance'], ascending=False)
 
-                feature_imp = pd.Series(importances, index=feature_names)
-                
-                data = DataFrame()
-                data.add_column('Importance', feature_imp)
-                data.sort(by_column_name_list=['Importance'], ascending=False)
-                # old version
-                #feature_imp.nlargest(10).plot(kind='barh')
-                
-                sns.set_theme(style="whitegrid")
-                # Initialize the matplotlib figure
-                f, ax = plt.subplots()
- 
-                # Plot the total crashes
-                #sns.set_color_codes("pastel")
-                sns.barplot(x=feature_imp.nlargest(features_nbr).index, y=feature_imp.nlargest(features_nbr),
-                            palette="Spectral")
+        # ---- Plot ----
+        _fi_sorted = feature_imp.nlargest(features_nbr).sort_values(ascending=False)
 
-                # Add a legend and informative axis label
-                plt.xlabel(x_label, fontsize=15)
-                plt.ylabel(y_label, fontsize=15)
-                
-                if rotation_angle_x_labels != 0:
-                    plt.xticks(fontsize=11, rotation=rotation_angle_x_labels, ha='right')
-                else:
-                    plt.xticks(fontsize=11)
-                    
-                plt.tight_layout()  # Adjust layout to make room for rotated labels 
-                plt.yticks(fontsize=11)
-                
-                if savefig is True:
-                    plt.savefig(figure_name, dpi=300, bbox_inches='tight')
-                    plt.close(f)
-                else:
-                    plt.show()
-            else:
-                etr_model = ExtraTreesClassifier()
-                etr_model.fit(self.x,self.y)
-                feature_imp = pd.Series(etr_model.feature_importances_,index=[i for i in range(self.x.shape[1])])
-                feature_imp.nlargest(10).plot(kind='barh')
-                data = DataFrame()
-                data.add_column('Importance', feature_imp)
-                data.sort(by_column_name_list=['Importance'], ascending=False)
-                # old version
-                #feature_imp.nlargest(10).plot(kind='barh')
-                
-                sns.set_theme(style="whitegrid")
-                # Initialize the matplotlib figure
-                f, ax = plt.subplots()
+        sns.set_theme(style="whitegrid")
+        f, ax = plt.subplots(figsize=(10, 6))
+        sns.barplot(x=_fi_sorted.index, y=_fi_sorted,
+                    palette="Spectral", order=_fi_sorted.index, ax=ax)
+        ax.set_title(f"Feature Importance — {self.model_name}", fontsize=14, fontweight='bold')
+        plt.xlabel(x_label, fontsize=15)
+        plt.ylabel(y_label, fontsize=15)
 
-                # Plot the total crashes
-                #sns.set_color_codes("pastel")
-                sns.barplot(x=feature_imp.nlargest(features_nbr).index, y=feature_imp.nlargest(features_nbr),
-                            palette="Spectral")
+        if rotation_angle_x_labels != 0:
+            plt.xticks(fontsize=11, rotation=rotation_angle_x_labels, ha='right')
+        else:
+            plt.xticks(fontsize=11)
 
-                # Add a legend and informative axis label
-                plt.xlabel('Features', fontsize=15)
-                plt.ylabel('Importance score', fontsize=15)
-                plt.xticks(fontsize=11)
-                plt.yticks(fontsize=11)
-                if savefig is True:
-                    plt.savefig(figure_name, dpi=300, bbox_inches='tight')
-                    plt.close(f)
-                else:
-                    plt.show()
-                
-                """model = self.__model # or XGBRegressor
-                plot_importance(model, importance_type = 'gain') # other options available
+        plt.tight_layout()
+        plt.yticks(fontsize=11)
+
+        if savefig:
+            plt.savefig(figure_name, dpi=300, bbox_inches='tight')
+        if show:
+            plt.show()
+        plt.close(f)
+
+        return data.get_dataframe()
+
+    # ------------------------------------------------------------------
+    # Comparative Radar Charts
+    # ------------------------------------------------------------------
+    def comparative_radars(
+        self,
+        metrics_path_as_list: list,
+        model_names: list = None,
+        output_dir: str = "radar_charts",
+        font_family: str = "DejaVu Sans",
+        skill_metrics_list: list = None,
+        error_metrics_list: list = None,
+        score_floor: float = 0.25,
+        plot_title: bool = True,
+        show: bool = False,
+    ):
+        """Generate publication-ready comparative radar charts from metrics txt files.
+
+        Parameters
+        ----------
+        metrics_path_as_list : list of str
+            Paths to metrics txt files (one per model). Each file must have
+            ``Key: value`` lines (as produced by the model evaluation pipeline).
+        model_names : list of str, optional
+            Display names for each model.  Defaults to the file stem of each path.
+        output_dir : str
+            Directory where PNG, SVG, and summary TXT are saved.
+        font_family : str
+            Font family used for all text in the figures (default: ``"DejaVu Sans"``).
+        skill_metrics_list : list of str, optional
+            Override the default higher-is-better metrics used for the skill radar.
+            Defaults to ``["R2", "R", "NSE", "KGE"]``.
+        error_metrics_list : list of str, optional
+            Override the default lower-is-better metrics used for the error radar.
+            Defaults to RMSE, MAE, MSE, MEDAE, MAPE, SMAPE, NRMSE_mean,
+            NRMSE_range, CV_RMSE_%, RAE, RSE, MSLE, PBIAS.
+        score_floor : float, optional
+            Minimum radial score assigned to the worst model on each spoke (default
+            ``0.25``). Rescales ``[0, 1] -> [score_floor, 1.0]`` so that even the
+            least-performing model is always visible on the chart.
+            Set to ``0.0`` to disable flooring.
+        plot_title : bool, optional
+            If ``True`` (default), draw chart titles. If ``False``, suppress
+            subplot titles and the combined figure title.
+        show : bool
+            Whether to display the figures interactively.
+        """
+        import os
+        import math
+        import numpy as np
+        import matplotlib
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+
+        if not show:
+            _original_backend = matplotlib.get_backend()
+            matplotlib.use("Agg")
+            plt.ioff()
+
+        # Higher-is-better metrics — used as-is (expected range ≈ 0-1)
+        SKILL_KEYS = skill_metrics_list if skill_metrics_list is not None else [
+            "R2", "R", "NSE", "KGE"
+        ]
+        # Lower-is-better metrics — will be normalised then inverted
+        # PBIAS can be negative; we work with |PBIAS|
+        ERROR_KEYS = error_metrics_list if error_metrics_list is not None else [
+            "RMSE", "MAE", "MSE", "MEDAE",
+            "MAPE", "SMAPE",
+            "NRMSE_mean", "NRMSE_range", "CV_RMSE_%",
+            "RAE", "RSE", "MSLE",
+            "PBIAS",   # treated as |PBIAS|
+        ]
+        # All keys that must be present in every file
+        REQUIRED = set(SKILL_KEYS) | set(ERROR_KEYS)
+
+        # ── 1. Parse metrics files ─────────────────────────────────────
+        def _parse_metrics(path: str) -> dict:
+            values = {}
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or ":" not in line:
+                        continue
+                    key, _, raw_val = line.partition(":")
+                    key = key.strip()
+                    try:
+                        values[key] = float(raw_val.strip())
+                    except ValueError:
+                        pass
+            # take absolute value of signed bias metric before anything else
+            if "PBIAS" in values:
+                values["PBIAS"] = abs(values["PBIAS"])
+            missing = REQUIRED - set(values.keys())
+            if missing:
+                raise KeyError(
+                    f"File '{path}' is missing required metrics: {sorted(missing)}"
+                )
+            return values
+
+        all_metrics = [_parse_metrics(p) for p in metrics_path_as_list]
+
+        if model_names is None:
+            model_names = [
+                os.path.splitext(os.path.basename(p))[0]
+                for p in metrics_path_as_list
+            ]
+        if len(model_names) != len(metrics_path_as_list):
+            raise ValueError(
+                "Length of model_names must match length of metrics_path_as_list."
+            )
+
+        # ── 2. Prepare colour palette ──────────────────────────────────
+        cmap = plt.cm.get_cmap("tab10", len(all_metrics))
+        colors = [cmap(i) for i in range(len(all_metrics))]
+
+        # ── 3. Normalize & invert error metrics ────────────────────────
+        def _normalize_invert_errors(metrics_list: list, keys: list) -> list:
+            """Return per-model dicts of final (inverted, normalised) error scores."""
+            col_vals = {k: [m[k] for m in metrics_list] for k in keys}
+            col_min  = {k: min(v) for k, v in col_vals.items()}
+            col_max  = {k: max(v) for k, v in col_vals.items()}
+            result = []
+            for m in metrics_list:
+                d = {}
+                for k in keys:
+                    mn, mx = col_min[k], col_max[k]
+                    if mx == mn:
+                        d[k] = 1.0
+                    else:
+                        d[k] = 1.0 - (m[k] - mn) / (mx - mn)
+                result.append(d)
+            return result
+
+        def _apply_floor(scores: list, keys: list, floor: float) -> list:
+            """Rescale [0,1] -> [floor, 1.0] so the worst model stays visible.
+            Also normalise skill values per-metric across models before flooring."""
+            if floor <= 0.0:
+                return scores
+            result = []
+            for d in scores:
+                result.append({k: floor + (1.0 - floor) * d[k] for k in keys})
+            return result
+
+        def _normalize_skill(metrics_list: list, keys: list) -> list:
+            """Per-metric min-max normalise raw skill values across models -> [0,1]."""
+            col_vals = {k: [m[k] for m in metrics_list] for k in keys}
+            col_min  = {k: min(v) for k, v in col_vals.items()}
+            col_max  = {k: max(v) for k, v in col_vals.items()}
+            result = []
+            for m in metrics_list:
+                d = {}
+                for k in keys:
+                    mn, mx = col_min[k], col_max[k]
+                    d[k] = 1.0 if mx == mn else (m[k] - mn) / (mx - mn)
+                result.append(d)
+            return result
+
+        normalized_errors = _normalize_invert_errors(all_metrics, ERROR_KEYS)
+        floored_errors    = _apply_floor(normalized_errors, ERROR_KEYS, score_floor)
+
+        normalized_skill  = _normalize_skill(all_metrics, SKILL_KEYS)
+        floored_skill     = _apply_floor(normalized_skill,  SKILL_KEYS, score_floor)
+
+        # ── 4. Adaptive y-range ────────────────────────────────────────
+        def _compute_y_range(values_flat, y_high=1.0, n_ticks=5, y_low_override=None):
+            """Return (y_low, y_high, tick_list) zoomed to the data extent."""
+            if y_low_override is not None:
+                y_low = y_low_override
+                ticks = list(np.linspace(y_low, y_high, n_ticks))
+                return y_low, y_high, ticks
+            if not values_flat:
+                return 0.0, y_high, list(np.linspace(0.0, y_high, n_ticks))
+            data_min = min(values_flat)
+            data_max = max(values_flat)
+            span = max(data_max - data_min, 1e-6)
+            # 15 % margin below the observed minimum
+            raw_low = data_min - 0.15 * span
+            # floor to nearest 0.05 so ticks land on clean numbers
+            y_low = max(0.0, math.floor(raw_low * 20) / 20)
+            ticks = list(np.linspace(y_low, y_high, n_ticks))
+            return y_low, y_high, ticks
+
+        # skill: use floored normalised values; axis starts just below score_floor
+        skill_flat  = [floored_skill[i][k] for i in range(len(floored_skill)) for k in SKILL_KEYS]
+        _sk_axis_low = max(0.0, score_floor - 0.08) if score_floor > 0 else 0.0
+        sk_low, sk_high, sk_ticks = _compute_y_range(skill_flat, y_low_override=_sk_axis_low)
+
+        # error: use floored values; axis starts just below score_floor
+        error_flat  = [floored_errors[i][k] for i in range(len(floored_errors)) for k in ERROR_KEYS]
+        _er_axis_low = max(0.0, score_floor - 0.08) if score_floor > 0 else 0.0
+        er_low, er_high, er_ticks = _compute_y_range(error_flat, y_low_override=_er_axis_low)
+
+        # ── 5. Radar helper ────────────────────────────────────────────
+        def _radar_axes(fig, rect, labels, title, y_low=0.0, y_high=1.0, ytick_vals=None):
+            n     = len(labels)
+            angles = [2 * math.pi * i / n for i in range(n)]
+            angles += angles[:1]           # close the loop
+
+            ax = fig.add_axes(rect, polar=True)
+            ax.set_theta_offset(math.pi / 2)
+            ax.set_theta_direction(-1)
+
+            ax.set_xticks(angles[:-1])
+            ax.set_xticklabels(labels, fontsize=10, fontweight="bold", fontfamily=font_family)
+            # push labels away from the outermost ring to avoid overlap
+            ax.tick_params(axis="x", pad=18)
+            ax.set_ylim(y_low, y_high)
+            if ytick_vals is None:
+                ytick_vals = list(np.linspace(y_low, y_high, 5))
+            ax.set_yticks(ytick_vals)
+            ax.set_yticklabels(
+                [f"{v:.2f}" for v in ytick_vals],
+                fontsize=7,
+                color="grey",
+                fontfamily=font_family,
+            )
+            ax.grid(color="grey", linestyle="--", linewidth=0.5, alpha=0.6)
+            if plot_title and title:
+                ax.set_title(title, fontsize=12, fontweight="bold", pad=22, fontfamily=font_family)
+            return ax, angles
+
+        def _fill_model(ax, angles, values, color, alpha_fill=0.12):
+            """Draw only the filled polygon (pass 1)."""
+            vals = values + values[:1]
+            ax.fill(angles, vals, color=color, alpha=alpha_fill)
+
+        def _line_model(ax, angles, values, color, label):
+            """Draw only the outline (pass 2 — always on top)."""
+            vals = values + values[:1]
+            ax.plot(angles, vals, color=color, linewidth=2.2, linestyle="solid", zorder=5)
+            return mpatches.Patch(facecolor=color, alpha=0.7, label=label)
+
+        def _draw_radar_layers(ax, angles, values_per_model, model_names, colors):
+            """Two-pass draw: all fills first, then all outlines on top."""
+            # pass 1 – fills
+            for vals, color in zip(values_per_model, colors):
+                _fill_model(ax, angles, vals, color)
+            # pass 2 – outlines (always visible regardless of fill size)
+            patches = []
+            for vals, name, color in zip(values_per_model, model_names, colors):
+                p = _line_model(ax, angles, vals, color, name)
+                patches.append(p)
+            return patches
+
+        # ── 6. Build combined figure (both radars side by side) ────────
+        os.makedirs(output_dir, exist_ok=True)
+
+        fig_combined = plt.figure(figsize=(14, 7))
+        fig_combined.patch.set_facecolor("white")
+
+        ax_skill, ang_skill = _radar_axes(
+            fig_combined, [0.05, 0.1, 0.38, 0.8], SKILL_KEYS,
+            "Skill Metrics (higher is better)",
+            y_low=sk_low, y_high=sk_high, ytick_vals=sk_ticks,
+        )
+        ax_error, ang_error = _radar_axes(
+            fig_combined, [0.57, 0.1, 0.38, 0.8], ERROR_KEYS,
+            "Error Metrics (normalised & inverted)",
+            y_low=er_low, y_high=er_high, ytick_vals=er_ticks,
+        )
+
+        all_skill_vals = [[floored_skill[i][k]  for k in SKILL_KEYS] for i in range(len(floored_skill))]
+        all_error_vals = [[floored_errors[i][k] for k in ERROR_KEYS] for i in range(len(floored_errors))]
+
+        legend_patches = _draw_radar_layers(ax_skill, ang_skill, all_skill_vals, model_names, colors)
+        _draw_radar_layers(ax_error, ang_error, all_error_vals, model_names, colors)
+
+        fig_combined.legend(
+            handles=legend_patches,
+            loc="lower center",
+            ncol=len(model_names),
+            fontsize=10,
+            frameon=False,
+            bbox_to_anchor=(0.5, 0.0),
+            prop={"family": font_family},
+        )
+        if plot_title:
+            fig_combined.suptitle(
+                "Model Comparison — Radar Charts",
+                fontsize=14, fontweight="bold", y=1.01, fontfamily=font_family
+            )
+        plt.tight_layout()
+
+        combined_png = os.path.join(output_dir, "comparative_radars.png")
+        combined_svg = os.path.join(output_dir, "comparative_radars.svg")
+        fig_combined.savefig(combined_png, dpi=300, bbox_inches="tight")
+        fig_combined.savefig(combined_svg, format="svg", bbox_inches="tight")
+        print(f"Combined radar chart saved: {combined_png}")
+        print(f"Combined radar chart saved: {combined_svg}")
+
+        if show:
+            plt.show()
+        plt.close(fig_combined)
+
+        # ── 7. Individual radar PNGs ───────────────────────────────────
+        def _single_radar(keys, title, values_per_model, fname_stem,
+                          y_low=0.0, y_high=1.0, ytick_vals=None):
+            fig = plt.figure(figsize=(7, 7.8))
+            fig.patch.set_facecolor("white")
+            # leave room at the bottom for the legend (rect: left, bottom, w, h)
+            ax, angles = _radar_axes(
+                fig, [0.1, 0.12, 0.8, 0.78], keys, title,
+                y_low=y_low, y_high=y_high, ytick_vals=ytick_vals,
+            )
+            patches = _draw_radar_layers(ax, angles, values_per_model, model_names, colors)
+            # legend sits just below the radar circle, tight to it
+            fig.legend(
+                handles=patches,
+                loc="lower center",
+                ncol=len(model_names),
+                fontsize=9,
+                frameon=False,
+                bbox_to_anchor=(0.5, 0.01),
+                prop={"family": font_family},
+            )
+            png_path = os.path.join(output_dir, f"{fname_stem}.png")
+            svg_path = os.path.join(output_dir, f"{fname_stem}.svg")
+            fig.savefig(png_path, dpi=300, bbox_inches="tight")
+            fig.savefig(svg_path, format="svg", bbox_inches="tight")
+            print(f"Saved: {png_path}")
+            print(f"Saved: {svg_path}")
+            if show:
                 plt.show()
-                # if you need a dictionary 
-                model.get_booster().get_score(importance_type = 'gain')"""
-            return data.get_dataframe() 
-        
-        
-        elif method == 'dt':
-            
-            from sklearn.ensemble import ExtraTreesRegressor, ExtraTreesClassifier
-            
-            if self.__task == 'r':
-                
-                etr_model = ExtraTreesRegressor()
-                etr_model.fit(self.x,self.y)
-                feature_imp = pd.Series(etr_model.feature_importances_,index=self.x.columns)
-                
-                data = DataFrame()
-                data.add_column('Importance', feature_imp)
-                data.sort(by_column_name_list=['Importance'], ascending=False)
-                
-                
-                data.show()
+            plt.close(fig)
 
-                sns.set_theme(style="whitegrid")
-                # Initialize the matplotlib figure
-                f, ax = plt.subplots()
- 
-                # Plot the total crashes
-                #sns.set_color_codes("pastel")
-                sns.barplot(x=feature_imp.nlargest(features_nbr).index, y=feature_imp.nlargest(features_nbr),
-                            palette="Spectral")
+        _single_radar(
+            SKILL_KEYS,
+            "Skill Metrics (higher is better)",
+            all_skill_vals,
+            "radar_skill",
+            y_low=sk_low, y_high=sk_high, ytick_vals=sk_ticks,
+        )
+        _single_radar(
+            ERROR_KEYS,
+            "Error Metrics (normalised & inverted)",
+            all_error_vals,
+            "radar_error",
+            y_low=er_low, y_high=er_high, ytick_vals=er_ticks,
+        )
 
-                # Add a legend and informative axis label
-                plt.xlabel(x_label, fontsize=15)
-                plt.ylabel(y_label, fontsize=15)
-                
-                if rotation_angle_x_labels != 0:
-                    plt.xticks(fontsize=11, rotation=rotation_angle_x_labels, ha='right')
-                else:
-                    plt.xticks(fontsize=11)
-                    
-                plt.tight_layout()  # Adjust layout to make room for rotated labels 
-                plt.yticks(fontsize=11)
-                
-                if savefig is True:
-                    plt.savefig(figure_name, dpi=300, bbox_inches='tight')
-                    plt.close(f)
-                else:
-                    plt.show()
-            else:
-                etr_model = ExtraTreesClassifier()
-                etr_model.fit(self.x,self.y)
-                feature_imp = pd.Series(etr_model.feature_importances_,index=[i for i in range(self.x.shape[1])])
-                feature_imp.nlargest(10).plot(kind='barh')
-                data = DataFrame()
-                data.add_column('Importance', feature_imp)
-                data.sort(by_column_name_list=['Importance'], ascending=False)
-                # old version
-                #feature_imp.nlargest(10).plot(kind='barh')
-                
-                sns.set_theme(style="whitegrid")
-                # Initialize the matplotlib figure
-                f, ax = plt.subplots()
+        # ── 7. Summary scores & TXT export ────────────────────────────
+        summary_lines = [
+            "Model Comparison Summary",
+            "=" * 60,
+            "",
+            "Methodology",
+            "-" * 60,
+            "Skill metrics used  : " + ", ".join(SKILL_KEYS),
+            "  -> Per-metric min-max normalised across models -> [0, 1].",
+            "  -> Mean Skill Score = arithmetic mean of those normalised values.",
+            "",
+            "Error metrics used  : " + ", ".join(ERROR_KEYS),
+            "  -> PBIAS is taken as |PBIAS| before normalisation.",
+            "  -> Each metric is first min-max normalised across all models:",
+            "       normalised = (value - min) / (max - min)",
+            "     then inverted so that higher means better performance:",
+            "       final_score = 1 - normalised",
+            "     Edge case: if max == min, all models receive 1.0 for that metric.",
+            "  -> Mean Error Score = arithmetic mean of the inverted-normalised values.",
+            "",
+            f"Visual score floor  : {score_floor}",
+            f"  -> Plotted values are rescaled to [{score_floor}, 1.0] for visibility.",
+            "  -> Scores reported below use the pre-floor [0, 1] values.",
+            "",
+            "Overall Score = (Mean Skill Score + Mean Error Score) / 2",
+            "Ranking is in descending order of Overall Score (higher is better).",
+            "=" * 60,
+            "",
+        ]
+        # Scores are computed from pre-floor normalised values (more meaningful)
+        score_data = []
+        for ns, ne, name in zip(normalized_skill, normalized_errors, model_names):
+            mean_skill = sum(ns[k] for k in SKILL_KEYS) / len(SKILL_KEYS)
+            mean_error = sum(ne[k] for k in ERROR_KEYS) / len(ERROR_KEYS)
+            overall    = (mean_skill + mean_error) / 2.0
+            score_data.append((name, mean_skill, mean_error, overall))
 
-                # Plot the total crashes
-                #sns.set_color_codes("pastel")
-                sns.barplot(x=feature_imp.nlargest(features_nbr).index, y=feature_imp.nlargest(features_nbr),
-                            palette="Spectral")
+            summary_lines.append(f"Model: {name}")
+            summary_lines.append(f"  Mean Skill Score  (R2/R/NSE/KGE avg)  : {mean_skill:.4f}")
+            summary_lines.append(f"  Mean Error Score  (norm-inv avg)       : {mean_error:.4f}")
+            summary_lines.append(f"  Overall Score     (average of above)   : {overall:.4f}")
+            summary_lines.append("")
 
-                # Add a legend and informative axis label
-                plt.xlabel('Features', fontsize=15)
-                plt.ylabel('Importance score', fontsize=15)
-                plt.xticks(fontsize=11)
-                plt.yticks(fontsize=11)
-                if savefig is True:
-                    plt.savefig(figure_name, dpi=300, bbox_inches='tight')
-                    plt.close(f)
-                else:
-                    plt.show()
-                
-                """model = self.__model # or XGBRegressor
-                plot_importance(model, importance_type = 'gain') # other options available
-                plt.show()
-                # if you need a dictionary 
-                model.get_booster().get_score(importance_type = 'gain')"""
-            return data.get_dataframe()    
-        
-        
-        elif method == 'rf':
-            pass
-        
+        # ranking
+        summary_lines.append("Ranking by Overall Score")
+        summary_lines.append("-" * 42)
+        for rank, (name, ms, me, ov) in enumerate(
+            sorted(score_data, key=lambda x: x[3], reverse=True), 1
+        ):
+            summary_lines.append(f"  #{rank}  {name}  —  {ov:.4f}")
+
+        txt_path = os.path.join(output_dir, "comparison_summary.txt")
+        with open(txt_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(summary_lines) + "\n")
+        print(f"Summary saved: {txt_path}")
+
+        if not show:
+            try:
+                matplotlib.use(_original_backend)
+            except Exception:
+                pass
+
+        return {
+            "combined_png": combined_png,
+            "combined_svg": combined_svg,
+            "skill_png":    os.path.join(output_dir, "radar_skill.png"),
+            "error_png":    os.path.join(output_dir, "radar_error.png"),
+            "summary_txt":  txt_path,
+            "scores":       {n: {"mean_skill": ms, "mean_error": me, "overall": ov}
+                             for n, ms, me, ov in score_data},
+        }
+
     def dt_text_representation(self):
         return tree.export_text(self.__model)
     

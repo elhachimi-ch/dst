@@ -21,7 +21,6 @@ from sklearn.metrics import mean_squared_error, r2_score, median_absolute_error,
 
 class Lib:
     
-    
     # Stephan Boltzmann constant (W m-2 K-4)
     SB = 5.670373e-8
     # heat capacity of dry air at constant pressure (J kg-1 K-1)
@@ -47,6 +46,18 @@ class Lib:
     
     def __init__(self, *args, **kwargs):
         pass
+    
+    @staticmethod
+    def create_folder_if_not_exists(folder_path):
+        """Ensure a folder exists. Returns the folder path."""
+        import os
+        try:
+            if folder_path is None:
+                return None
+            os.makedirs(folder_path, exist_ok=True)
+        except Exception as e:
+            print(f"Lib.create_folder_if_not_exists: could not create '{folder_path}': {e}")
+        return folder_path
     
     @staticmethod
     def et0_penman_monteith_daily_v3(row):
@@ -1875,6 +1886,82 @@ class Lib:
     @staticmethod
     def list_all_files_in_folder(folder_path):
         return [f for f in listdir(folder_path) if isfile(join(folder_path, f))]
+
+    @staticmethod
+    def delete_files_regx(input_folder, regex_pattern):
+        """
+        Delete files in ``input_folder`` whose file names match ``regex_pattern``.
+
+        Notes:
+        - Regex matching uses ``re.search`` on the file name.
+        - For convenience, extension-like patterns such as ``'.xml'`` are also
+          treated as suffix matching (``filename.endswith('.xml')``).
+                - Displays a tqdm progress bar while scanning files.
+                - Prints a final summary (scanned, matched, deleted, failed).
+
+        Returns:
+            list[str]: Names of deleted files.
+        """
+        import os
+        try:
+            from tqdm import tqdm
+        except Exception:
+            tqdm = None
+
+        input_folder = str(input_folder)
+        regex_pattern = str(regex_pattern)
+
+        if not os.path.isdir(input_folder):
+            raise FileNotFoundError(f"Input folder does not exist: {input_folder}")
+
+        try:
+            compiled_regex = re.compile(regex_pattern)
+        except re.error as e:
+            raise ValueError(f"Invalid regex pattern '{regex_pattern}': {e}")
+
+        is_extension_like = (
+            regex_pattern.startswith('.')
+            and regex_pattern.count('.') == 1
+            and regex_pattern[1:].isalnum()
+        )
+
+        deleted_files = []
+        failed_files = []
+        scanned_count = 0
+        matched_count = 0
+
+        all_entries = listdir(input_folder)
+        iterator = all_entries
+        if tqdm is not None:
+            iterator = tqdm(all_entries, desc="delete_files_regx", unit="file")
+
+        for file_name in iterator:
+            file_path = join(input_folder, file_name)
+            if not isfile(file_path):
+                continue
+            scanned_count += 1
+
+            matches_regex = compiled_regex.search(file_name) is not None
+            matches_extension = is_extension_like and file_name.lower().endswith(regex_pattern.lower())
+
+            if matches_regex or matches_extension:
+                matched_count += 1
+                try:
+                    os.remove(file_path)
+                    deleted_files.append(file_name)
+                except Exception as e:
+                    failed_files.append((file_name, str(e)))
+
+        print(
+            f"delete_files_regx summary | folder={input_folder} | pattern={regex_pattern} | "
+            f"scanned={scanned_count} | matched={matched_count} | deleted={len(deleted_files)} | failed={len(failed_files)}"
+        )
+        if len(failed_files) > 0:
+            print("delete_files_regx failed files:")
+            for failed_name, failed_reason in failed_files:
+                print(f"- {failed_name}: {failed_reason}")
+
+        return deleted_files
 
     @staticmethod
     def translate(string_in, langue_dest='fr'):
