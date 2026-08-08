@@ -1,10 +1,8 @@
 try:
-    from .dataframe import DataFrame
     from .lib import Lib
     from .vectorizer import Vectorizer
     from .chart import Chart
 except ImportError:
-    from dataframe import DataFrame
     from lib import Lib
     from vectorizer import Vectorizer
     from chart import Chart
