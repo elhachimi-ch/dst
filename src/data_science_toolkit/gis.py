@@ -1,10 +1,12 @@
 try:
     from .lib import Lib
+    from .dataframe import DataFrame
 except ImportError:
     from lib import Lib
+    from dataframe import DataFrame
+
 import numpy as np
 from numpy.linalg import matrix_power
-from dataframe import DataFrame
 import pandas as pd
 import contextily as cx
 from matplotlib import pyplot as plt
