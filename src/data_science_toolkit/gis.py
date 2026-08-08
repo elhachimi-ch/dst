@@ -1,5 +1,7 @@
-from .rl import * # from .rl import * in production
-from .lib import Lib # from .lib import Lib in production
+try:
+    from .lib import Lib
+except ImportError:
+    from lib import Lib
 import numpy as np
 from numpy.linalg import matrix_power
 from dataframe import DataFrame
@@ -17,6 +19,7 @@ class GIS:
     """
     def __init__(self):
         self.data_layers = {}
+        self.data_sources = {}          # layer_name → source file path
         self.fig, self.ax = plt.subplots(figsize=(17,17))
 
     def add_data_layer(self, layer_name, data_path, data_type='sf', lon_column_name=None, lat_column_name=None, crs='4326'):
@@ -30,6 +33,7 @@ class GIS:
             self.data_layers[layer_name] = gpd.read_file(data_path)
         elif data_type == 'parquet':
             self.data_layers[layer_name] = gpd.read_parquet(data_path)
+            self.data_sources[layer_name] = data_path
         elif data_type == 'geojson':
             self.data_layers[layer_name] = gpd.read_file(data_path)
         
@@ -428,8 +432,18 @@ class GIS:
             series = pd.Series(np.random.randn(self.get_shape(layer_name)[0]))
         self.add_column(layer_name, series, column_name)
     
-    def join_layers(self, left_layer, right_layer, on, how='inner'):
-        self.data_layers[left_layer] = self.data_layers.get(left_layer).merge(self.data_layers.get(right_layer), on=on, how=how)
+    def join_layers(self, left_layer, right_layer, on, how='inner', new_data_layer_name=None):
+        left = self.data_layers.get(left_layer)
+        right = self.data_layers.get(right_layer)
+        if left is None:
+            raise ValueError(f"Layer '{left_layer}' not found in data_layers")
+        if right is None:
+            raise ValueError(f"Layer '{right_layer}' not found in data_layers")
+
+        joined = left.merge(right, on=on, how=how)
+        dest_layer = new_data_layer_name if new_data_layer_name is not None else left_layer
+        self.data_layers[dest_layer] = joined
+        return joined
     def column_to_list(self, layer_name, column_name, verbose=True):
         column_as_list = self.get_column(layer_name, column_name).tolist()
         if verbose is True:
@@ -581,14 +595,32 @@ class GIS:
         if layer_name not in self.data_layers:
             print(f"❌ Error: Layer '{layer_name}' not found")
             return
-            
+
+        import os
         try:
             if file_format == 'geojson':
                 self.data_layers[layer_name].to_file(file_name, driver='GeoJSON')
             elif file_format == 'shapefile':
                 self.data_layers[layer_name].to_file(file_name, driver='ESRI Shapefile')
             elif file_format == 'parquet':
-                self.data_layers[layer_name].to_parquet(file_name)
+                pq_kwargs = {}
+                source_path = self.data_sources.get(layer_name)
+                if source_path and os.path.exists(source_path):
+                    try:
+                        import pyarrow.parquet as pq
+                        src_meta = pq.ParquetFile(source_path).schema_arrow
+                        src_pf = pq.ParquetFile(source_path)
+                        col0_meta = src_pf.metadata.row_group(0).column(0)
+                        compression = col0_meta.compression.lower()
+                        if compression and compression != 'uncompressed':
+                            pq_kwargs['compression'] = compression.upper()
+                        row_group_size = src_pf.metadata.row_group(0).num_rows
+                        if row_group_size:
+                            pq_kwargs['row_group_size'] = row_group_size
+                        print(f"ℹ️ Reusing source parquet settings: {pq_kwargs}")
+                    except Exception as e:
+                        print(f"⚠️ Could not read source parquet settings: {e}")
+                self.data_layers[layer_name].to_parquet(file_name, **pq_kwargs)
             else:
                 print(f"❌ Error: Unsupported file format '{file_format}'")
                 return
@@ -796,15 +828,114 @@ class GIS:
         """
         self.data_layers[layer_name] = self.data_layers[layer_name].drop(column_name, axis=1)
         return self.data_layers[layer_name]
-    
+
+    def drop_columns(self, layer_name, columns):
+        """Drop one or more columns from a data layer.
+
+        Parameters
+        ----------
+        layer_name : str
+            Name of the data layer.
+        columns : list[str]
+            Column names to drop.
+
+        Returns
+        -------
+        GeoDataFrame
+            The updated layer.
+        """
+        self.data_layers[layer_name] = self.data_layers[layer_name].drop(columns=columns, errors='ignore')
+        return self.data_layers[layer_name]
+
     def keep_columns(self, layer_name, columns_names_as_list):
         for p in self.get_columns_names(layer_name):
             if p not in columns_names_as_list:
                 self.data_layers[layer_name] = self.data_layers[layer_name].drop(p, axis=1)
-    def group_by(self, layer_name, group_by_column_name, agg_func='sum'):
-        # Dissolve the fields by the 'canal' column
-        self.data_layers[layer_name] = self.data_layers[layer_name].dissolve(by=group_by_column_name, aggfunc='sum')
-                
+    def group_by_aggregate(self, layer_name, group_by_column_name=None, agg_func='sum', **agg_kwargs):
+        """Group a data layer and aggregate.
+
+        Parameters
+        ----------
+        layer_name : str
+            Name of the data layer.
+        group_by_column_name : str, list[str] or None
+            Column(s) to group by.  When ``None`` or ``'geometry'`` the
+            geometry is used as the grouping key.  A list may mix
+            ``'geometry'`` with regular column names (e.g.
+            ``['geometry', 'year']``).
+        agg_func : str
+            Aggregation function used by ``dissolve`` when no named
+            aggregations are given (default ``'sum'``).
+        **agg_kwargs
+            Named aggregation specs forwarded to
+            ``DataFrame.agg()``, e.g.
+            ``flood_count=('uuid', 'count')``.  When provided,
+            a ``geometry=('geometry', 'first')`` entry is added
+            automatically if missing so the result stays a
+            GeoDataFrame.
+        """
+        import geopandas as gpd
+
+        gdf = self.data_layers[layer_name].copy()
+
+        # --- Resolve grouping keys --------------------------------
+        if group_by_column_name is None or group_by_column_name == 'geometry':
+            group_by_column_name = ['geometry']
+        elif isinstance(group_by_column_name, str):
+            group_by_column_name = [group_by_column_name]
+
+        use_geom = 'geometry' in group_by_column_name
+
+        if use_geom:
+            gdf['_geom_wkt'] = gdf.geometry.to_wkt()
+            keys = ['_geom_wkt' if k == 'geometry' else k
+                    for k in group_by_column_name]
+        else:
+            keys = list(group_by_column_name)
+
+        # --- Aggregate -------------------------------------------
+        if agg_kwargs:
+            # Ensure geometry is preserved
+            if 'geometry' not in agg_kwargs:
+                agg_kwargs['geometry'] = ('geometry', 'first')
+            result = gdf.groupby(keys).agg(**agg_kwargs).reset_index(drop=True)
+            result = gpd.GeoDataFrame(result, geometry='geometry', crs=gdf.crs)
+        else:
+            if use_geom:
+                result = gdf.dissolve(by=keys, aggfunc=agg_func).reset_index(drop=True)
+            else:
+                result = gdf.dissolve(by=keys, aggfunc=agg_func).reset_index(drop=True)
+
+        result = result.drop(columns=['_geom_wkt'], errors='ignore')
+        self.data_layers[layer_name] = result
+        return result
+
+    def sample(self, layer_name, n=None, ratio=None, random_state=None):
+        """Sample rows from a GeoDataFrame layer.
+
+        Parameters
+        ----------
+        layer_name : str
+            Name of the data layer.
+        n : int, optional
+            Exact number of rows to sample.
+        ratio : float, optional
+            Fraction of rows to sample (0 < ratio <= 1).
+            Ignored when *n* is provided.
+        random_state : int, optional
+            Seed for reproducibility.
+        """
+        gdf = self.data_layers[layer_name]
+        if n is not None:
+            n = min(int(n), len(gdf))
+            self.data_layers[layer_name] = gdf.sample(n=n, random_state=random_state).reset_index(drop=True)
+        elif ratio is not None:
+            ratio = max(0.0, min(float(ratio), 1.0))
+            self.data_layers[layer_name] = gdf.sample(frac=ratio, random_state=random_state).reset_index(drop=True)
+        else:
+            raise ValueError("Provide either 'n' (number of rows) or 'ratio' (fraction).")
+        print(f"📊 Sampled {len(self.data_layers[layer_name])} rows from '{layer_name}' (was {len(gdf)})")
+
     def get_area_column(self, layer_name):
         return self.get_data_layer(layer_name).area
     
@@ -833,20 +964,48 @@ class GIS:
             else:
                 return self.data_layers[layer_name].loc[self.get_column(column).apply(func_de_decision)]
 
-    def transform_column(self, layer_name, column_to_trsform, column_src, fun_de_trasformation, in_place= True,*args):
+    def transform_column(self, layer_name, column_name, transformation_func, in_place=True, *args):
         if in_place is True:
             if (len(args) != 0):
-                self.set_column(layer_name, column_to_trsform, self.get_column(layer_name, column_src).apply(fun_de_trasformation, args=(args[0],)))
+                self.set_column(layer_name, column_name, self.get_column(layer_name, column_name).apply(transformation_func, args=(args[0],)))
             else:
-                self.set_column(layer_name, column_to_trsform, self.get_column(layer_name, column_src).apply(fun_de_trasformation)) 
+                self.set_column(layer_name, column_name, self.get_column(layer_name, column_name).apply(transformation_func))
         else:
             if (len(args) != 0):
-                return self.get_column(layer_name, column_src).apply(fun_de_trasformation, args=(args[0],))
+                return self.get_column(layer_name, column_name).apply(transformation_func, args=(args[0],))
             else:
-                return self.get_column(layer_name, column_src).apply(fun_de_trasformation)
+                return self.get_column(layer_name, column_name).apply(transformation_func)
             
     def set_column(self, layer_name, column_name, new_column):
         self.data_layers[layer_name][column_name] = new_column
+
+    def add_column_based_on_transformed_columns(self, layer_name, new_column_name, transform_fn):
+        """Create a new column by applying a row-wise function.
+
+        Parameters
+        ----------
+        layer_name : str
+            Name of the data layer.
+        new_column_name : str
+            Name for the new column to create.
+        transform_fn : callable
+            Function that receives each row (pd.Series) and returns a value.
+
+        Examples
+        --------
+        gis.add_column_based_on_transformed_columns(
+            'floods', 'year',
+            lambda d: pd.Timestamp(d['start_date']).year
+        )
+
+        gis.add_column_based_on_transformed_columns(
+            'floods', 'duration_days',
+            lambda d: (pd.Timestamp(d['end_date']) - pd.Timestamp(d['start_date'])).days
+        )
+        """
+        gdf = self.data_layers[layer_name]
+        self.data_layers[layer_name][new_column_name] = gdf.apply(transform_fn, axis=1)
+        print(f"✅ Added column '{new_column_name}' to '{layer_name}'")
     
     def get_column(self, layer_name, column_name):
         return self.data_layers[layer_name][column_name]

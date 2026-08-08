@@ -1,6 +1,14 @@
-from .lib import Lib # from .lib import Lib in production
-from .vectorizer import Vectorizer # from .vectorizer import Vectorizer in production
-from .chart import Chart # from .chart import Chart in production
+try:
+    from .dataframe import DataFrame
+    from .lib import Lib
+    from .vectorizer import Vectorizer
+    from .chart import Chart
+except ImportError:
+    from dataframe import DataFrame
+    from lib import Lib
+    from vectorizer import Vectorizer
+    from chart import Chart
+    
 from datetime import timedelta
 from logging import Logger
 from math import ceil
@@ -9369,12 +9377,309 @@ class DataFrame:
             fig.savefig(savefig_path, dpi=720)
         plt.show()
         
-    def split_export(self, percentage=0.8, train_out_file="train.csv", test_out_file="test.csv"):
-        train = self.dataframe.iloc[:int(percentage*self.get_shape()[0]), :]
-        test = self.dataframe.iloc[int(percentage*self.get_shape()[0]):, :]
-        train.to_csv(train_out_file, index=False)
-        test.to_csv(test_out_file, index=False) 
-        
+    def split_export(
+        self,
+        percentage=0.8,
+        train_output_path="train.csv",
+        test_output_path="test.csv",
+        method="sequential",
+        random_state=42,
+        compression="zstd",
+        index=False,
+        show_progress=True,
+        train_out_file=None,
+        test_out_file=None,
+    ):
+        """
+        Split the DataFrame into train/test and export each part.
+
+        File format is inferred from each output path extension:
+          - ``.csv`` -> CSV
+          - ``.parquet`` -> Parquet
+
+        Works for in-memory pandas DataFrames and lazy Parquet datasets
+        (``data_type='parquet'``), streaming the latter without loading all
+        rows into memory.
+
+        Args:
+            percentage: Train fraction in (0, 1]. Test gets the remainder.
+            train_output_path: Destination path for the train split.
+            test_output_path: Destination path for the test split.
+            method: ``"sequential"`` (default, first rows = train) or
+                ``"random"`` (shuffle then split).
+            random_state: Seed used when ``method="random"``.
+            compression: Parquet compression codec (ignored for CSV).
+            index: Whether to write the DataFrame index (pandas path only).
+            show_progress: Show tqdm progress while exporting.
+            train_out_file / test_out_file: Deprecated aliases for the path args.
+        """
+        import os
+        from pathlib import Path
+        from tqdm import tqdm
+
+        if train_out_file is not None:
+            train_output_path = train_out_file
+        if test_out_file is not None:
+            test_output_path = test_out_file
+
+        pct = float(percentage)
+        if not (0.0 < pct <= 1.0):
+            raise ValueError("percentage must be in (0, 1].")
+
+        method_norm = str(method or "sequential").strip().lower()
+        if method_norm in ("sequtial", "seq"):  # common typos / short form
+            method_norm = "sequential"
+        if method_norm not in ("sequential", "random"):
+            raise ValueError('method must be "sequential" or "random".')
+
+        def _infer_fmt(path: str) -> str:
+            ext = Path(path).suffix.lower()
+            if ext == ".csv":
+                return "csv"
+            if ext in (".parquet", ".pq"):
+                return "parquet"
+            raise ValueError(
+                f"Unsupported output extension for '{path}'. "
+                "Use .csv or .parquet."
+            )
+
+        train_fmt = _infer_fmt(train_output_path)
+        test_fmt = _infer_fmt(test_output_path)
+
+        for path in (train_output_path, test_output_path):
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+
+        n = int(self.get_shape()[0])
+        if n == 0:
+            raise ValueError("Cannot split_export an empty DataFrame.")
+
+        n_train = int(pct * n)
+        if n_train <= 0:
+            raise ValueError("percentage too small: train split would be empty.")
+        if n_train >= n:
+            n_train = n - 1 if n > 1 else n
+        n_test = n - n_train
+
+        is_parquet_ds = (
+            getattr(self, "data_type", None) == "parquet"
+            and hasattr(self, "dataset")
+            and self.dataset is not None
+        )
+
+        # ---- Parquet dataset path (stream; self.dataframe is intentionally empty) ----
+        if is_parquet_ds:
+            import numpy as np
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+
+            schema = self.dataset.schema
+            keep_cols = list(schema.names)
+            root_abs = os.path.abspath(self.data_path)
+            fragments = list(self.dataset.get_fragments())
+
+            is_train_mask = None
+            if method_norm == "random":
+                is_train_mask = np.zeros(n, dtype=np.bool_)
+                is_train_mask[:n_train] = True
+                np.random.default_rng(int(random_state)).shuffle(is_train_mask)
+
+            writer_train = None
+            writer_test = None
+            csv_train_header = True
+            csv_test_header = True
+            rows_seen = 0
+            rows_train_written = 0
+            rows_test_written = 0
+
+            def _ensure_parquet_writer(which: str, tbl):
+                nonlocal writer_train, writer_test
+                if which == "train":
+                    if writer_train is None:
+                        writer_train = pq.ParquetWriter(
+                            train_output_path,
+                            tbl.schema,
+                            compression=compression,
+                            use_dictionary=True,
+                            write_statistics=True,
+                        )
+                    return writer_train
+                if writer_test is None:
+                    writer_test = pq.ParquetWriter(
+                        test_output_path,
+                        tbl.schema,
+                        compression=compression,
+                        use_dictionary=True,
+                        write_statistics=True,
+                    )
+                return writer_test
+
+            def _write_part(which: str, tbl):
+                nonlocal csv_train_header, csv_test_header
+                nonlocal rows_train_written, rows_test_written
+                if tbl is None or tbl.num_rows == 0:
+                    return
+                path = train_output_path if which == "train" else test_output_path
+                fmt = train_fmt if which == "train" else test_fmt
+                if fmt == "parquet":
+                    _ensure_parquet_writer(which, tbl).write_table(tbl)
+                else:
+                    pdf = tbl.to_pandas()
+                    header = csv_train_header if which == "train" else csv_test_header
+                    mode = "w" if header else "a"
+                    pdf.to_csv(path, index=False, header=header, mode=mode)
+                    if which == "train":
+                        csv_train_header = False
+                    else:
+                        csv_test_header = False
+                if which == "train":
+                    rows_train_written += tbl.num_rows
+                else:
+                    rows_test_written += tbl.num_rows
+
+            def _resolve_fragment_path(fragment) -> str:
+                frag_rel = getattr(fragment, "path", None) or ""
+                if not frag_rel:
+                    return ""
+                return frag_rel if os.path.isabs(frag_rel) else os.path.join(root_abs, frag_rel)
+
+            frag_iter = tqdm(fragments, desc="Split export", disable=not show_progress)
+            try:
+                for fragment in frag_iter:
+                    frag_abs = _resolve_fragment_path(fragment)
+                    pf = None
+                    if frag_abs:
+                        try:
+                            pf = pq.ParquetFile(frag_abs)
+                        except Exception:
+                            pf = None
+
+                    if pf is None:
+                        tables = [fragment.to_table(columns=keep_cols)]
+                        rg_iter = tables
+                    else:
+                        rg_iter = range(pf.num_row_groups)
+                        if show_progress:
+                            rg_iter = tqdm(rg_iter, desc="RowGroups", leave=False)
+
+                    for rg in rg_iter:
+                        if pf is None:
+                            tbl = rg
+                        else:
+                            tbl = pf.read_row_group(rg, columns=keep_cols, use_threads=True)
+                        if tbl.num_rows == 0:
+                            continue
+
+                        start = rows_seen
+                        end = rows_seen + tbl.num_rows
+
+                        if method_norm == "sequential":
+                            if end <= n_train:
+                                _write_part("train", tbl)
+                            elif start >= n_train:
+                                _write_part("test", tbl)
+                            else:
+                                cut = n_train - start
+                                _write_part("train", tbl.slice(0, cut))
+                                _write_part("test", tbl.slice(cut))
+                        else:
+                            mask = is_train_mask[start:end]
+                            train_idx = np.flatnonzero(mask)
+                            test_idx = np.flatnonzero(~mask)
+                            if train_idx.size:
+                                _write_part("train", tbl.take(pa.array(train_idx)))
+                            if test_idx.size:
+                                _write_part("test", tbl.take(pa.array(test_idx)))
+
+                        rows_seen = end
+                        frag_iter.set_postfix(
+                            train=rows_train_written,
+                            test=rows_test_written,
+                        )
+            finally:
+                if writer_train is not None:
+                    writer_train.close()
+                if writer_test is not None:
+                    writer_test.close()
+
+            # Empty-split safety (schema-only files)
+            if rows_train_written == 0 and train_fmt == "parquet":
+                empty_tbl = pa.table({c: pa.array([], type=schema.field(c).type) for c in keep_cols})
+                pq.write_table(empty_tbl, train_output_path, compression=compression)
+            if rows_test_written == 0 and test_fmt == "parquet":
+                empty_tbl = pa.table({c: pa.array([], type=schema.field(c).type) for c in keep_cols})
+                pq.write_table(empty_tbl, test_output_path, compression=compression)
+
+            print(
+                f"✅ split_export ({method_norm}): {rows_train_written:,} train / "
+                f"{rows_test_written:,} test rows "
+                f"-> {train_output_path}, {test_output_path}"
+            )
+            return {
+                "method": method_norm,
+                "percentage": pct,
+                "n_total": n,
+                "n_train": int(rows_train_written),
+                "n_test": int(rows_test_written),
+                "train_output_path": train_output_path,
+                "test_output_path": test_output_path,
+                "train_format": train_fmt,
+                "test_format": test_fmt,
+            }
+
+        # ---- In-memory pandas path ----
+        df = self.get_dataframe() if hasattr(self, "get_dataframe") else self.dataframe
+        if df is None or len(df) == 0:
+            raise ValueError(
+                "In-memory DataFrame is empty. For parquet sources use data_type='parquet' "
+                "or call load_parquet_to_in_memory_dataframe() first."
+            )
+
+        steps = tqdm(total=3, desc="Split export", disable=not show_progress)
+        try:
+            if method_norm == "random":
+                steps.set_postfix_str("shuffling")
+                df_split = df.sample(frac=1.0, random_state=int(random_state)).reset_index(drop=True)
+            else:
+                df_split = df
+            steps.update(1)
+
+            train = df_split.iloc[:n_train, :]
+            test = df_split.iloc[n_train:, :]
+            steps.set_postfix_str("writing train")
+            if train_fmt == "csv":
+                train.to_csv(train_output_path, index=index)
+            else:
+                train.to_parquet(train_output_path, index=index, compression=compression)
+            steps.update(1)
+
+            steps.set_postfix_str("writing test")
+            if test_fmt == "csv":
+                test.to_csv(test_output_path, index=index)
+            else:
+                test.to_parquet(test_output_path, index=index, compression=compression)
+            steps.update(1)
+        finally:
+            steps.close()
+
+        print(
+            f"✅ split_export ({method_norm}): {len(train):,} train / "
+            f"{len(test):,} test rows "
+            f"-> {train_output_path}, {test_output_path}"
+        )
+        return {
+            "method": method_norm,
+            "percentage": pct,
+            "n_total": n,
+            "n_train": int(len(train)),
+            "n_test": int(len(test)),
+            "train_output_path": train_output_path,
+            "test_output_path": test_output_path,
+            "train_format": train_fmt,
+            "test_format": test_fmt,
+        }
+
     def show_wordcloud(self, column):
         wordcloud = WordCloud(
             background_color='white',
@@ -9399,6 +9704,8 @@ class DataFrame:
         overwrite: bool = False,
         compression: str = "zstd",
         show_progress: bool = True,
+        method: str = "sequential",
+        random_state: int = 42,
     ) -> dict:
         """
         Export a subset of rows to a new Parquet file.
@@ -9417,17 +9724,27 @@ class DataFrame:
             overwrite: Overwrite existing output_path if it exists.
             compression: Parquet compression codec (e.g., 'zstd', 'snappy', 'gzip').
             show_progress: Show progress for parquet datasets.
+            method: ``"sequential"`` (default, first ``n_rows`` / percentage) or
+                ``"random"`` (random sample of that size).
+            random_state: Seed used when ``method="random"``.
 
         Returns:
-            dict with {'output_file', 'rows_requested', 'rows_written', 'columns'}
+            dict with {'output_file', 'rows_requested', 'rows_written', 'columns', 'method'}
         """
         import os
         import math
         import pandas as pd
+        import numpy as np
 
         # Validate selection arguments
         if (n_rows is None and percentage is None) or (n_rows is not None and percentage is not None):
             raise ValueError("Provide exactly one of n_rows or percentage.")
+
+        method_norm = str(method or "sequential").strip().lower()
+        if method_norm in ("sequtial", "seq"):
+            method_norm = "sequential"
+        if method_norm not in ("sequential", "random"):
+            raise ValueError('method must be "sequential" or "random".')
 
         # Normalize output path to a file
         out_path = output_path
@@ -9458,27 +9775,59 @@ class DataFrame:
             if target_rows <= 0:
                 raise ValueError("n_rows must be > 0.")
 
+        target_rows = min(target_rows, int(total_rows))
+
         # Pandas path
         if self.data_type != 'parquet' or not hasattr(self, 'dataset'):
+            from tqdm import tqdm
+
             df = self.get_dataframe()
             if columns is not None:
                 missing = [c for c in columns if c not in df.columns]
                 if missing:
                     raise ValueError(f"Columns not found: {missing}")
                 df = df[columns]
-            subset = df.head(target_rows)
-            subset.to_parquet(out_path, index=False, compression=compression)
+
+            steps = ["select", "write"]
+            pbar = tqdm(
+                total=len(steps),
+                desc=f"Export ({method_norm})",
+                disable=not show_progress,
+                unit="step",
+            )
+            try:
+                pbar.set_postfix_str(f"selecting {target_rows:,} rows")
+                if method_norm == "random":
+                    subset = df.sample(
+                        n=target_rows,
+                        random_state=int(random_state),
+                        replace=False,
+                    )
+                else:
+                    subset = df.head(target_rows)
+                pbar.update(1)
+
+                pbar.set_postfix_str(f"writing {len(subset):,} rows")
+                subset.to_parquet(out_path, index=False, compression=compression)
+                pbar.update(1)
+            finally:
+                pbar.close()
+
+            print(
+                f"✅ Exported {len(subset)} rows to {out_path} "
+                f"(requested {target_rows}, method={method_norm})."
+            )
             return {
                 "output_file": out_path,
                 "rows_requested": target_rows,
                 "rows_written": len(subset),
                 "columns": list(subset.columns),
+                "method": method_norm,
             }
 
         # Parquet dataset path (single output file)
         import pyarrow as pa
         import pyarrow.parquet as pq
-        import os
         from tqdm import tqdm
 
         schema = self.dataset.schema
@@ -9493,54 +9842,103 @@ class DataFrame:
 
         root_abs = os.path.abspath(self.data_path)
         fragments = list(self.dataset.get_fragments())
-        remaining = target_rows
         writer = None
         rows_written = 0
 
-        # Progress over files/row-groups
-        frag_iter = tqdm(fragments, desc="Fragments", disable=not show_progress)
+        keep_mask = None
+        if method_norm == "random":
+            keep_mask = np.zeros(int(total_rows), dtype=np.bool_)
+            keep_mask[:target_rows] = True
+            np.random.default_rng(int(random_state)).shuffle(keep_mask)
+
+        remaining = target_rows  # used only for sequential early-stop
+        rows_seen = 0
+
+        # Row-based progress (fragment-only bars barely move on single-file datasets)
+        pbar = tqdm(
+            total=target_rows,
+            desc=f"Export ({method_norm})",
+            unit="row",
+            unit_scale=True,
+            disable=not show_progress,
+        )
+
+        def _write_table(tbl):
+            nonlocal writer, rows_written
+            if tbl is None or tbl.num_rows == 0:
+                return
+            if writer is None:
+                writer = pq.ParquetWriter(
+                    out_path,
+                    tbl.schema,
+                    compression=compression,
+                    use_dictionary=True,
+                    write_statistics=True,
+                )
+            writer.write_table(tbl)
+            rows_written += tbl.num_rows
+            pbar.update(tbl.num_rows)
+            pbar.set_postfix(scanned=f"{rows_seen:,}/{total_rows:,}")
+
         try:
-            for fragment in frag_iter:
-                if remaining <= 0:
+            for fragment in fragments:
+                if method_norm == "sequential" and remaining <= 0:
                     break
                 frag_rel = getattr(fragment, "path", None) or ""
                 frag_abs = frag_rel if os.path.isabs(frag_rel) else os.path.join(root_abs, frag_rel)
                 try:
                     pf = pq.ParquetFile(frag_abs)
-                except Exception as e:
+                except Exception:
                     # Fallback: try reading as a table from the fragment
                     try:
                         tbl = fragment.to_table(columns=keep_cols)
-                        if remaining < tbl.num_rows:
-                            tbl = tbl.slice(0, remaining)
-                        if writer is None:
-                            writer = pq.ParquetWriter(out_path, tbl.schema, compression=compression, use_dictionary=True, write_statistics=True)
-                        writer.write_table(tbl)
-                        rows_written += tbl.num_rows
-                        remaining -= tbl.num_rows
-                        frag_iter.set_postfix(written=rows_written)
+                        if tbl.num_rows == 0:
+                            continue
+                        if method_norm == "random":
+                            start = rows_seen
+                            end = rows_seen + tbl.num_rows
+                            sel = keep_mask[start:end]
+                            rows_seen = end
+                            if not np.any(sel):
+                                pbar.set_postfix(scanned=f"{rows_seen:,}/{total_rows:,}")
+                                continue
+                            tbl = tbl.filter(pa.array(sel))
+                        else:
+                            if remaining < tbl.num_rows:
+                                tbl = tbl.slice(0, remaining)
+                            remaining -= tbl.num_rows
+                            rows_seen += tbl.num_rows
+                        _write_table(tbl)
                         continue
                     except Exception as ee:
                         raise RuntimeError(f"Failed to read fragment: {frag_rel}. Error: {ee}") from ee
 
-                rg_iter = range(pf.num_row_groups)
-                if show_progress:
-                    rg_iter = tqdm(rg_iter, desc="RowGroups", leave=False)
-                for rg_idx in rg_iter:
-                    if remaining <= 0:
+                for rg_idx in range(pf.num_row_groups):
+                    if method_norm == "sequential" and remaining <= 0:
                         break
                     rg_tbl = pf.read_row_group(rg_idx, columns=keep_cols, use_threads=True)
                     if rg_tbl.num_rows == 0:
                         continue
-                    to_write = rg_tbl if remaining >= rg_tbl.num_rows else rg_tbl.slice(0, remaining)
-                    if writer is None:
-                        writer = pq.ParquetWriter(out_path, to_write.schema, compression=compression, use_dictionary=True, write_statistics=True)
-                    writer.write_table(to_write)
-                    rows_written += to_write.num_rows
-                    remaining -= to_write.num_rows
-                    if show_progress:
-                        frag_iter.set_postfix(written=rows_written)
+
+                    if method_norm == "random":
+                        start = rows_seen
+                        end = rows_seen + rg_tbl.num_rows
+                        sel = keep_mask[start:end]
+                        rows_seen = end
+                        if not np.any(sel):
+                            pbar.set_postfix(scanned=f"{rows_seen:,}/{total_rows:,}")
+                            continue
+                        to_write = rg_tbl.filter(pa.array(sel))
+                    else:
+                        to_write = (
+                            rg_tbl if remaining >= rg_tbl.num_rows else rg_tbl.slice(0, remaining)
+                        )
+                        remaining -= to_write.num_rows
+                        rows_seen += to_write.num_rows
+
+                    _write_table(to_write)
         finally:
+            pbar.close()
             if writer is not None:
                 writer.close()
 
@@ -9549,12 +9947,16 @@ class DataFrame:
             empty_tbl = pa.table({c: pa.array([], type=schema.field(c).type) for c in keep_cols})
             pq.write_table(empty_tbl, out_path, compression=compression)
 
-        print(f"✅ Exported {rows_written} rows to {out_path} (requested {target_rows}).")
+        print(
+            f"✅ Exported {rows_written} rows to {out_path} "
+            f"(requested {target_rows}, method={method_norm})."
+        )
         return {
             "output_file": out_path,
             "rows_requested": target_rows,
             "rows_written": rows_written,
             "columns": keep_cols,
+            "method": method_norm,
         }
     
     
@@ -12976,6 +13378,403 @@ class DataFrame:
                     self.transform_column(name, log_function, min_column)
             self.convert_dataframe_type()
             return self.get_dataframe()
+
+    def scale_dataframe_parquet(
+        self,
+        output_parquet_path: str,
+        method: str = "standard",
+        columns: list[str] | None = None,
+        exclude_columns: list[str] | None = None,
+        compression: str = "zstd",
+        overwrite: bool = False,
+        show_progress: bool = True,
+        scaler_path: str | None = None,
+        load_scaler_path: str | None = None,
+        fit_sample_rows: int | None = None,
+        feature_range: tuple[float, float] = (0.0, 1.0),
+        n_quantiles: int = 1000,
+        output_distribution: str = "uniform",
+        random_state: int = 42,
+        row_group_size: int | None = None,
+        with_mean: bool = True,
+        with_std: bool = True,
+    ) -> dict:
+        """
+        Scale selected columns and stream the result to a Parquet file.
+
+        Works for in-memory pandas DataFrames and lazy Parquet datasets
+        (``data_type='parquet'``). For Parquet sources this is typically a
+        two-pass process: fit the scaler, then transform + write.
+
+        Args:
+            output_parquet_path: Destination ``.parquet`` file path.
+            method: One of ``standard``, ``min_max`` / ``minmax``, ``robust``,
+                ``maxabs`` / ``max_abs``, ``quantile``. Ignored when
+                ``load_scaler_path`` is set.
+            columns: Columns to scale. ``None`` = all numeric columns
+                (minus ``exclude_columns``).
+            exclude_columns: Columns never scaled (copied as-is). Useful for
+                ids, dates, targets.
+            compression: Parquet codec (``zstd``, ``snappy``, ``gzip``, …).
+            overwrite: Overwrite ``output_parquet_path`` if it exists.
+            show_progress: Show tqdm bars.
+            scaler_path: Optional path to joblib-dump the fitted scaler.
+            load_scaler_path: Optional path to a previously saved scaler
+                (transform-only; skips fitting).
+            fit_sample_rows: If set, fit on at most this many rows (useful for
+                ``robust`` / ``quantile`` on huge files). ``None`` = use all
+                rows (or streaming ``partial_fit`` when supported).
+            feature_range: ``MinMaxScaler`` range.
+            n_quantiles / output_distribution / random_state:
+                ``QuantileTransformer`` options.
+            row_group_size: Optional output row-group size (rows).
+            with_mean / with_std: ``StandardScaler`` options.
+
+        Returns:
+            dict summary including output path, method, scaled columns, rows.
+        """
+        import os
+        import joblib
+        import numpy as np
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from tqdm import tqdm
+        from sklearn.preprocessing import (
+            StandardScaler,
+            MinMaxScaler,
+            RobustScaler,
+            MaxAbsScaler,
+            QuantileTransformer,
+        )
+
+        method_aliases = {
+            "standard": "standard",
+            "std": "standard",
+            "zscore": "standard",
+            "min_max": "min_max",
+            "minmax": "min_max",
+            "min-max": "min_max",
+            "robust": "robust",
+            "maxabs": "maxabs",
+            "max_abs": "maxabs",
+            "quantile": "quantile",
+        }
+        method_norm = method_aliases.get(str(method or "standard").strip().lower())
+        if method_norm is None and load_scaler_path is None:
+            raise ValueError(
+                f"Unsupported method={method!r}. "
+                "Use: standard, min_max, robust, maxabs, quantile."
+            )
+
+        out_path = str(output_parquet_path)
+        if not out_path.lower().endswith((".parquet", ".pq")):
+            raise ValueError("output_parquet_path must end with .parquet or .pq")
+        parent = os.path.dirname(out_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if os.path.exists(out_path) and not overwrite:
+            raise FileExistsError(f"{out_path} exists. Set overwrite=True to overwrite.")
+
+        exclude = set(exclude_columns or [])
+
+        def _build_scaler(name: str):
+            if name == "standard":
+                return StandardScaler(with_mean=with_mean, with_std=with_std)
+            if name == "min_max":
+                return MinMaxScaler(feature_range=feature_range)
+            if name == "robust":
+                return RobustScaler()
+            if name == "maxabs":
+                return MaxAbsScaler()
+            if name == "quantile":
+                return QuantileTransformer(
+                    n_quantiles=int(n_quantiles),
+                    output_distribution=output_distribution,
+                    random_state=int(random_state),
+                )
+            raise ValueError(f"Unsupported method: {name}")
+
+        def _resolve_scale_cols(all_cols, dtypes_or_df):
+            if columns is not None:
+                scale_cols = [c for c in columns if c in all_cols and c not in exclude]
+                missing = [c for c in columns if c not in all_cols]
+                if missing:
+                    raise ValueError(f"columns not found: {missing}")
+                return scale_cols
+            # auto: numeric only
+            if isinstance(dtypes_or_df, pd.DataFrame):
+                numeric = list(dtypes_or_df.select_dtypes(include=[np.number]).columns)
+            else:
+                # pyarrow schema fields
+                numeric = []
+                for field in dtypes_or_df:
+                    try:
+                        if pa.types.is_floating(field.type) or pa.types.is_integer(field.type):
+                            numeric.append(field.name)
+                    except Exception:
+                        continue
+            return [c for c in numeric if c not in exclude]
+
+        def _scale_block(df: pd.DataFrame, scale_cols: list[str], scaler) -> pd.DataFrame:
+            out = df.copy()
+            if scale_cols:
+                # Scaler returns float64; cast destination cols so pandas does not
+                # warn about writing into float32 / int columns.
+                scaled = np.asarray(
+                    scaler.transform(df[scale_cols].to_numpy(dtype=np.float64)),
+                    dtype=np.float64,
+                )
+                for i, col in enumerate(scale_cols):
+                    out[col] = scaled[:, i]
+            return out
+
+        # ---------------- Load pre-fitted scaler ----------------
+        fitted_from_file = False
+        if load_scaler_path is not None:
+            if not os.path.exists(load_scaler_path):
+                raise FileNotFoundError(f"load_scaler_path not found: {load_scaler_path}")
+            payload = joblib.load(load_scaler_path)
+            if isinstance(payload, dict) and "scaler" in payload:
+                scaler = payload["scaler"]
+                method_norm = payload.get("method", method_norm or "standard")
+                scale_cols_from_file = payload.get("columns")
+            else:
+                scaler = payload
+                scale_cols_from_file = None
+            if not hasattr(scaler, "n_features_in_"):
+                raise ValueError(f"Scaler at {load_scaler_path} does not look fitted.")
+            fitted_from_file = True
+        else:
+            scaler = _build_scaler(method_norm)
+            scale_cols_from_file = None
+
+        is_parquet_ds = (
+            getattr(self, "data_type", None) == "parquet"
+            and hasattr(self, "dataset")
+            and self.dataset is not None
+        )
+
+        # ---------------- In-memory pandas path ----------------
+        if not is_parquet_ds:
+            df = self.get_dataframe()
+            if df is None or len(df) == 0:
+                raise ValueError("DataFrame is empty; nothing to scale.")
+            scale_cols = (
+                list(scale_cols_from_file)
+                if scale_cols_from_file is not None
+                else _resolve_scale_cols(list(df.columns), df)
+            )
+            if not scale_cols and not fitted_from_file:
+                raise ValueError("No numeric columns selected to scale.")
+            if fitted_from_file and scale_cols_from_file is not None:
+                missing = [c for c in scale_cols if c not in df.columns]
+                if missing:
+                    raise ValueError(f"Loaded scaler columns missing from data: {missing}")
+
+            if not fitted_from_file:
+                fit_df = df[scale_cols]
+                if fit_sample_rows is not None and int(fit_sample_rows) > 0:
+                    fit_df = fit_df.head(int(fit_sample_rows))
+                print(
+                    f"🔧 Fitting {method_norm} scaler on {len(fit_df):,} rows × "
+                    f"{len(scale_cols)} columns..."
+                )
+                scaler.fit(fit_df.to_numpy(dtype=np.float64))
+
+            scaled = _scale_block(df, scale_cols, scaler)
+            scaled.to_parquet(out_path, index=False, compression=compression)
+            self.vectorizer = scaler
+
+            if scaler_path:
+                joblib.dump(
+                    {"scaler": scaler, "method": method_norm, "columns": scale_cols},
+                    scaler_path,
+                )
+                print(f"✅ Scaler saved to {scaler_path}")
+
+            print(
+                f"✅ scale_dataframe_parquet ({method_norm}): wrote {len(scaled):,} rows "
+                f"→ {out_path}"
+            )
+            return {
+                "output_parquet_path": out_path,
+                "method": method_norm,
+                "scaled_columns": scale_cols,
+                "exclude_columns": sorted(exclude),
+                "rows_written": int(len(scaled)),
+                "compression": compression,
+                "scaler_path": scaler_path,
+                "load_scaler_path": load_scaler_path,
+                "mode": "dataframe",
+            }
+
+        # ---------------- Parquet dataset / file path ----------------
+        schema = self.dataset.schema
+        all_cols = list(schema.names)
+        scale_cols = (
+            list(scale_cols_from_file)
+            if scale_cols_from_file is not None
+            else _resolve_scale_cols(all_cols, schema)
+        )
+        if not scale_cols:
+            raise ValueError("No numeric columns selected to scale.")
+        missing = [c for c in scale_cols if c not in all_cols]
+        if missing:
+            raise ValueError(f"columns not found in parquet schema: {missing}")
+
+        root_abs = os.path.abspath(self.data_path) if getattr(self, "data_path", None) else ""
+        fragments = list(self.dataset.get_fragments())
+
+        def _iter_row_group_tables(columns_needed: list[str] | None = None):
+            cols = columns_needed
+            for fragment in fragments:
+                frag_rel = getattr(fragment, "path", None) or ""
+                frag_abs = (
+                    frag_rel
+                    if (frag_rel and os.path.isabs(frag_rel))
+                    else (os.path.join(root_abs, frag_rel) if frag_rel else "")
+                )
+                pf = None
+                if frag_abs:
+                    try:
+                        pf = pq.ParquetFile(frag_abs)
+                    except Exception:
+                        pf = None
+                if pf is None:
+                    tbl = fragment.to_table(columns=cols)
+                    yield tbl
+                    continue
+                for rg in range(pf.num_row_groups):
+                    yield pf.read_row_group(rg, columns=cols, use_threads=True)
+
+        # Pass 1: fit (unless loading a fitted scaler)
+        if not fitted_from_file:
+            supports_partial = method_norm in ("standard", "min_max", "maxabs")
+            if supports_partial and fit_sample_rows is None:
+                print(
+                    f"🔧 Fitting {method_norm} via partial_fit over parquet row groups "
+                    f"({len(scale_cols)} columns)..."
+                )
+                rg_iter = _iter_row_group_tables(scale_cols)
+                rg_iter = tqdm(rg_iter, desc="Fit scaler", disable=not show_progress)
+                n_seen = 0
+                for tbl in rg_iter:
+                    if tbl.num_rows == 0:
+                        continue
+                    X = tbl.to_pandas()[scale_cols].to_numpy(dtype=np.float64)
+                    scaler.partial_fit(X)
+                    n_seen += X.shape[0]
+                    if show_progress:
+                        try:
+                            rg_iter.set_postfix(rows=f"{n_seen:,}")
+                        except Exception:
+                            pass
+                if n_seen == 0:
+                    raise ValueError("No rows found to fit scaler.")
+            else:
+                # Collect a fit sample (required for robust/quantile, or when fit_sample_rows set)
+                target = int(fit_sample_rows) if fit_sample_rows is not None else None
+                print(
+                    f"🔧 Collecting fit sample for {method_norm}"
+                    + (f" (max {target:,} rows)" if target else " (all rows)")
+                    + "..."
+                )
+                parts = []
+                n_seen = 0
+                rg_iter = _iter_row_group_tables(scale_cols)
+                rg_iter = tqdm(rg_iter, desc="Fit sample", disable=not show_progress)
+                for tbl in rg_iter:
+                    if tbl.num_rows == 0:
+                        continue
+                    pdf = tbl.to_pandas()
+                    if target is not None:
+                        remain = target - n_seen
+                        if remain <= 0:
+                            break
+                        if len(pdf) > remain:
+                            pdf = pdf.iloc[:remain]
+                    parts.append(pdf[scale_cols])
+                    n_seen += len(pdf)
+                    if target is not None and n_seen >= target:
+                        break
+                if not parts:
+                    raise ValueError("No rows found to fit scaler.")
+                fit_df = pd.concat(parts, ignore_index=True)
+                scaler.fit(fit_df.to_numpy(dtype=np.float64))
+                print(f"✅ Fitted on {len(fit_df):,} rows.")
+
+        self.vectorizer = scaler
+
+        # Pass 2: transform + stream write (all columns)
+        writer = None
+        rows_written = 0
+        try:
+            rg_iter = _iter_row_group_tables(None)  # all columns
+            rg_iter = tqdm(rg_iter, desc="Scale+write", disable=not show_progress)
+            for tbl in rg_iter:
+                if tbl.num_rows == 0:
+                    continue
+                pdf = tbl.to_pandas()
+                # ensure scale cols present
+                for c in scale_cols:
+                    if c not in pdf.columns:
+                        raise ValueError(f"Column '{c}' missing in a row group.")
+                scaled_pdf = _scale_block(pdf, scale_cols, scaler)
+                out_tbl = pa.Table.from_pandas(scaled_pdf, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(
+                        out_path,
+                        out_tbl.schema,
+                        compression=compression,
+                        use_dictionary=True,
+                        write_statistics=True,
+                    )
+                if row_group_size is not None and int(row_group_size) > 0:
+                    rg_sz = int(row_group_size)
+                    start = 0
+                    n = out_tbl.num_rows
+                    while start < n:
+                        end = min(start + rg_sz, n)
+                        writer.write_table(out_tbl.slice(start, end - start))
+                        start = end
+                else:
+                    writer.write_table(out_tbl)
+                rows_written += out_tbl.num_rows
+                if show_progress:
+                    try:
+                        rg_iter.set_postfix(written=f"{rows_written:,}")
+                    except Exception:
+                        pass
+        finally:
+            if writer is not None:
+                writer.close()
+
+        if rows_written == 0:
+            raise ValueError("No rows written to output parquet.")
+
+        if scaler_path:
+            joblib.dump(
+                {"scaler": scaler, "method": method_norm, "columns": scale_cols},
+                scaler_path,
+            )
+            print(f"✅ Scaler saved to {scaler_path}")
+
+        print(
+            f"✅ scale_dataframe_parquet ({method_norm}): wrote {rows_written:,} rows "
+            f"→ {out_path}"
+        )
+        return {
+            "output_parquet_path": out_path,
+            "method": method_norm,
+            "scaled_columns": scale_cols,
+            "exclude_columns": sorted(exclude),
+            "rows_written": int(rows_written),
+            "compression": compression,
+            "scaler_path": scaler_path,
+            "load_scaler_path": load_scaler_path,
+            "mode": "parquet",
+        }
     
     def load_dataset(self, dataset='iris'):
         """

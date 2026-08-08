@@ -1,7 +1,14 @@
-from .dataframe import DataFrame # from .dataframe import DataFrame in production
-from .chart import Chart # from .chart import Chart in production
-from .model import Model # from .model import Model in production
-from .chart import * # from .chart import * in production
+try:
+    from .dataframe import DataFrame
+    from .chart import Chart
+    from .model import Model
+    from .chart import *
+except ImportError:
+    from dataframe import DataFrame
+    from chart import Chart
+    from model import Model
+    from chart import *
+    
 from math import exp
 from climatefiller import ClimateFiller
 import numpy as np

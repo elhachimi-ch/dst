@@ -1,4 +1,7 @@
-from .lib import Lib # from .lib import Lib in production
+try:
+    from .lib import Lib
+except ImportError:
+    from lib import Lib
 import numpy as np
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer

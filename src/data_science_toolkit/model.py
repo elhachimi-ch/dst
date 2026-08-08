@@ -1,7 +1,10 @@
 """
 Under MIT License by EL HACHIMI CHOUAIB
 """
-from .dataframe import DataFrame # from .dataframe import DataFrame in production
+try:
+    from .dataframe import DataFrame
+except ImportError:
+    from dataframe import DataFrame
 from matplotlib import pyplot as plt
 import pandas as pd
 import numpy as np
@@ -367,7 +370,6 @@ class TerraAquaPatchDataset(Dataset):
 
 
 
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 def masked_l1(pred, target, mask):
@@ -936,6 +938,187 @@ class Model:
 
         return x_train, x_test, y_train, y_test
 
+    @staticmethod
+    def _resolve_train_val_test_indices(
+        n_rows: int,
+        train_ratio: float | None = None,
+        val_ratio: float | None = None,
+        *,
+        topology: str = "trainval_vs_test",
+        random_state: int = 42,
+        val_optional: bool = True,
+        shuffle: bool = True,
+    ) -> dict:
+        """
+        Build train/val/test index arrays for streaming and full-data train* methods.
+
+        ``train_ratio`` of ``None`` or ``>= 1`` means train on the whole dataset
+        (no test holdout). Validation is still carved from the train portion when
+        ``val_ratio`` is active.
+
+        topology:
+          - ``trainval_vs_test``: first split train(+val) vs test; then carve val
+            from the train portion with ``test_size=val_ratio``.
+          - ``train_vs_rest``: first split train vs rest; then carve val/test from
+            rest with relative size ``val_ratio / (1 - train_ratio)``. When training
+            on the whole file, val (if any) is carved from all rows and test is empty.
+
+        val_optional:
+          - True: ``val_ratio is None`` or ``<= 0`` disables validation.
+          - False: treat ``val_ratio`` as required numeric (caller should pre-fill
+            defaults like ``validation_percentage``).
+        """
+        from sklearn.model_selection import train_test_split
+
+        if n_rows <= 0:
+            raise ValueError("n_rows must be > 0.")
+
+        topology_norm = str(topology or "trainval_vs_test").strip().lower()
+        if topology_norm not in ("trainval_vs_test", "train_vs_rest"):
+            raise ValueError(
+                'topology must be "trainval_vs_test" or "train_vs_rest".'
+            )
+
+        train_on_whole = (train_ratio is None) or (float(train_ratio) >= 1.0)
+        if train_on_whole:
+            tr_ratio = 1.0
+        else:
+            tr_ratio = float(train_ratio)
+            if not (0.0 < tr_ratio < 1.0):
+                raise ValueError(
+                    f"train_ratio must be None, 1, or in (0, 1); got {train_ratio!r}."
+                )
+
+        if val_optional:
+            use_val = (val_ratio is not None) and (float(val_ratio) > 0)
+            vl_ratio = float(val_ratio) if use_val else None
+        else:
+            vl_ratio = float(val_ratio) if val_ratio is not None else 0.0
+            use_val = vl_ratio > 0
+
+        all_idx = np.arange(int(n_rows), dtype=np.int64)
+
+        if topology_norm == "trainval_vs_test":
+            if train_on_whole:
+                trainval_idx = all_idx
+                test_idx = np.array([], dtype=np.int64)
+            else:
+                trainval_idx, test_idx = train_test_split(
+                    all_idx,
+                    train_size=tr_ratio,
+                    random_state=random_state,
+                    shuffle=shuffle,
+                )
+            if use_val:
+                train_idx, val_idx = train_test_split(
+                    trainval_idx,
+                    test_size=vl_ratio,
+                    random_state=random_state,
+                    shuffle=shuffle,
+                )
+            else:
+                train_idx = trainval_idx
+                val_idx = np.array([], dtype=np.int64)
+        else:
+            # train_vs_rest
+            if train_on_whole:
+                if use_val:
+                    train_idx, val_idx = train_test_split(
+                        all_idx,
+                        test_size=vl_ratio,
+                        random_state=random_state,
+                        shuffle=shuffle,
+                    )
+                else:
+                    train_idx = all_idx
+                    val_idx = np.array([], dtype=np.int64)
+                test_idx = np.array([], dtype=np.int64)
+            else:
+                train_idx, rest_idx = train_test_split(
+                    all_idx,
+                    train_size=tr_ratio,
+                    random_state=random_state,
+                    shuffle=shuffle,
+                )
+                if len(rest_idx) > 0 and use_val:
+                    denom = max(1e-12, (1.0 - tr_ratio))
+                    val_rel = min(0.999, float(vl_ratio) / denom)
+                    val_idx, test_idx = train_test_split(
+                        rest_idx,
+                        train_size=val_rel,
+                        random_state=random_state,
+                        shuffle=shuffle,
+                    )
+                else:
+                    val_idx = np.array([], dtype=np.int64)
+                    test_idx = rest_idx
+
+        return {
+            "train_idx": np.asarray(train_idx, dtype=np.int64),
+            "val_idx": np.asarray(val_idx, dtype=np.int64),
+            "test_idx": np.asarray(test_idx, dtype=np.int64),
+            "tr_ratio": float(tr_ratio),
+            "vl_ratio": (float(vl_ratio) if use_val else None),
+            "train_on_whole": bool(train_on_whole),
+            "use_val": bool(use_val),
+        }
+
+    @staticmethod
+    def _is_feature_matrix(x) -> bool:
+        """True if ``x`` is a usable 1D/2D feature or target array (not None/scalar nan)."""
+        if x is None:
+            return False
+        try:
+            if isinstance(x, float) and np.isnan(x):
+                return False
+        except Exception:
+            pass
+        try:
+            arr = np.asarray(x)
+        except Exception:
+            return False
+        if arr.ndim == 0:
+            return False
+        if arr.size == 0:
+            return False
+        return True
+
+    def _scaler_x_is_fitted(self) -> bool:
+        sx = getattr(self, "scaler_x", None)
+        return sx is not None and hasattr(sx, "n_features_in_")
+
+    def _scaler_y_is_fitted(self) -> bool:
+        sy = getattr(self, "scaler_y", None)
+        return sy is not None and hasattr(sy, "n_features_in_")
+
+    def _transform_features(self, X, *, fit: bool = False):
+        """
+        Apply ``scaler_x`` to a feature matrix when configured.
+        ``fit=True`` fits on ``X`` then transforms; otherwise transforms with a fitted scaler.
+        """
+        if getattr(self, "scaler_x", None) is None or X is None:
+            return X
+        if fit:
+            return self.scaler_x.fit_transform(X)
+        if not self._scaler_x_is_fitted():
+            return X
+        return self.scaler_x.transform(X)
+
+    def _apply_scaler_x_to_splits(self, X_train, X_val=None, X_test=None):
+        """Fit scaler_x on train (if configured) and transform train/val/test."""
+        if getattr(self, "scaler_x", None) is None:
+            return X_train, X_val, X_test
+        if X_train is None:
+            return X_train, X_val, X_test
+        name = getattr(self, "scaler_x_name", type(self.scaler_x).__name__)
+        print(f"🔧 Fitting scaler_x ({name}) on train features ({len(X_train):,} rows)...")
+        X_train = self.scaler_x.fit_transform(X_train)
+        if X_val is not None:
+            X_val = self.scaler_x.transform(X_val)
+        if X_test is not None:
+            X_test = self.scaler_x.transform(X_test)
+        return X_train, X_val, X_test
+
     def __init__(
         self, 
         data_x=None, 
@@ -954,6 +1137,14 @@ class Model:
         max_gpus='all', 
         use_gpu: bool = False,
         single_parquet_path: str | None = None,
+        target_column_name: str = "y",
+        exclude_cols: list[str] | None = None,
+        iterations: int | None = None,
+        depth: int | None = None,
+        lr: float | None = None,
+        early_stopping_rounds: int | None = None,
+        early_stop_after_n_itiration: int | None = None,
+        epochs: int | None = None,
         reading_mode: str | None = 'dataframe',
         workers_data_loaders: int = 7,
         prefetch_factor: int = 2,
@@ -1006,6 +1197,14 @@ class Model:
         self.use_gpu = use_gpu
         self._parquet_mode = parquet_batches_data is not None
         self.single_parquet_path = single_parquet_path
+        self.target_column_name = target_column_name
+        self.exclude_cols = exclude_cols if exclude_cols is not None else exclude_columns
+        self.iterations = iterations
+        self.depth = depth
+        self.lr = lr
+        self.early_stopping_rounds = early_stopping_rounds
+        self.early_stop_after_n_itiration = early_stop_after_n_itiration
+        self.epochs = epochs
         self._single_parquet_mode = single_parquet_path is not None and not self._parquet_mode
         self.reading_mode = reading_mode
         self.output_metrics_dir = output_metrics_dir
@@ -1015,6 +1214,7 @@ class Model:
         self.__batch_size = batch_size
         self.model_name  = model_name
         self.__model = None  # Initialize to None, will be set by model type or load_model()
+        self._cv_train_config = {}
         self.__boosted_model = None
         self.__generator = generator
         self.history = None
@@ -1031,6 +1231,8 @@ class Model:
         self.__y_train = None
         self.__y_test = None
         self._example_vector_printed_flags = set()
+        self.scaler_x_name = scaler_x_name
+        self.scaler_y_name = scaler_y_name
         
         if scaler_x_name == 'minmax':
             self.scaler_x = MinMaxScaler()
@@ -1063,11 +1265,36 @@ class Model:
             raise ValueError(f"Unsupported scaler: {scaler_y_name}")
 
 
+        # Only scale immediately when in-memory features/targets are already loaded.
+        # Parquet / streaming modes load later — scaling is deferred to train / load.
         if self.scaler_x is not None:
-            self.scale_x()
+            if Model._is_feature_matrix(self.x):
+                self.scale_x()
+            else:
+                print(
+                    f"ℹ️  scaler_x_name={scaler_x_name!r} set; feature scaling deferred "
+                    "until data is loaded or a train* method materializes X."
+                )
             
         if self.scaler_y is not None:
-            self.scale_y()
+            if Model._is_feature_matrix(self.y) or (
+                self.y is not None and hasattr(self.y, "values")
+            ):
+                try:
+                    y_arr = np.asarray(self.y if not hasattr(self.y, "values") else self.y.values)
+                    if y_arr.ndim == 0 or (isinstance(self.y, float) and np.isnan(self.y)):
+                        raise ValueError("empty")
+                    self.scale_y()
+                except Exception:
+                    print(
+                        f"ℹ️  scaler_y_name={scaler_y_name!r} set; target scaling deferred "
+                        "until data is loaded or a train* method materializes y."
+                    )
+            else:
+                print(
+                    f"ℹ️  scaler_y_name={scaler_y_name!r} set; target scaling deferred "
+                    "until data is loaded or a train* method materializes y."
+                )
         
         # if not exist create the output directory
         if not os.path.exists(self.output_metrics_dir):
@@ -1087,7 +1314,8 @@ class Model:
             else:
                 raise ValueError("parquet_batches_data provided but no 'train_loader' found or iterable given.")
         elif self.reading_mode == "dataframe":
-            if self.x is not None and training_percent != 1:
+            _train_whole = (training_percent is None) or (float(training_percent) >= 1.0)
+            if self.x is not None and not _train_whole:
                 if self.__task == 'c' and self.balanced_classes_in_test:
                     self.__x_train, self.__x_test, self.__y_train, self.__y_test = (
                         Model._train_test_split_balanced_test(
@@ -1103,14 +1331,22 @@ class Model:
                         train_size=training_percent,
                         test_size=1 - training_percent,
                     )
+            elif self.x is not None and _train_whole:
+                self.__x_train, self.__x_test, self.__y_train, self.__y_test = self.x, None, self.y, None
                 
         elif self.reading_mode == "file_path":
-            if training_percent != 1:
-                self._load_single_parquet_into_memory()
+            self._load_single_parquet_into_memory()
         elif self.reading_mode == "empty_model":
             # load empty model
             pass
 
+        # Pop model-level hyperparameters if passed via **kwargs
+        for _hp_key in (
+            "iterations", "depth", "lr", "early_stopping_rounds",
+            "early_stop_after_n_itiration", "epochs",
+        ):
+            if _hp_key in kwargs and getattr(self, _hp_key, None) is None:
+                setattr(self, _hp_key, kwargs.pop(_hp_key))
         
         if model_name  == 'decision_tree':
             from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
@@ -1203,6 +1439,11 @@ class Model:
                 self.__model = GradientBoostingRegressor()
             
         elif model_name  == 'tabformer':
+            if not _TORCH_AVAILABLE:
+                raise RuntimeError(
+                    f"model_name='tabformer' requires PyTorch, but torch failed to import: "
+                    f"{_TORCH_IMPORT_ERROR}"
+                )
             # Initialize TabFormer model
             if self.x is not None:
                 # In-memory data: infer input dim from numpy/array
@@ -1249,6 +1490,11 @@ class Model:
             task='c' -> TabPFNClassifier (probabilities via predict_proba)
             task!='c' -> TabPFNRegressor
             """
+            if not _TORCH_AVAILABLE:
+                raise RuntimeError(
+                    f"model_name='tabpfn' requires PyTorch, but torch failed to import: "
+                    f"{_TORCH_IMPORT_ERROR}"
+                )
             try:
                 from tabpfn import TabPFNClassifier, TabPFNRegressor
                 from tabpfn.constants import ModelVersion
@@ -1359,8 +1605,10 @@ class Model:
         context: str = "training",
         once_key: str | None = None,
         max_features_to_print: int = 60,
+        y_data=None,
+        target_name: str | None = None,
     ):
-        """Print one sample feature vector to verify feature order and values."""
+        """Print one sample feature vector (and optional target) to verify feature order and values."""
         try:
             if once_key is not None:
                 if once_key in self._example_vector_printed_flags:
@@ -1418,6 +1666,17 @@ class Model:
 
             if n_features > limit:
                 print(f"   ... ({n_features - limit} more features not shown)")
+
+            if y_data is not None:
+                y_arr = np.asarray(y_data).reshape(-1)
+                if y_arr.size > 0:
+                    y_val = y_arr[0]
+                    tname = target_name or getattr(self, "target_column_name", None) or "y"
+                    try:
+                        y_str = f"{float(y_val):.6g}"
+                    except (TypeError, ValueError):
+                        y_str = str(y_val)
+                    print(f"   target ({tname}) = {y_str}")
 
             if once_key is not None:
                 self._example_vector_printed_flags.add(once_key)
@@ -1606,6 +1865,69 @@ class Model:
             "device": str(self.device)
         }
 
+
+    def _resolve_training_device(self) -> str:
+        """Human-readable device string for the active model backend."""
+        mn = str(getattr(self, "model_name", "") or "").lower()
+        use_gpu = bool(getattr(self, "use_gpu", False))
+
+        if mn in ("xgboost", "xgb"):
+            if use_gpu:
+                try:
+                    import xgboost as xgb
+                    ver = getattr(xgb, "__version__", "1.7.0")
+                    parts = [int(p) for p in ver.split(".")[:2]]
+                    if tuple(parts) >= (2, 0):
+                        return "cuda (xgboost device=cuda, tree_method=hist)"
+                    return "cuda (xgboost tree_method=gpu_hist)"
+                except Exception:
+                    return "cuda (xgboost; use_gpu=True)"
+            return "cpu (xgboost)"
+
+        if mn == "catboost":
+            if use_gpu:
+                devices = "0"
+                try:
+                    if getattr(self, "_used_gpu_ids", None):
+                        devices = ",".join(str(i) for i in self._used_gpu_ids)
+                    elif bool(getattr(self, "all_gpu", False)) or str(
+                        getattr(self, "max_gpus", "")
+                    ).lower() == "all":
+                        import torch
+                        total = torch.cuda.device_count() if torch.cuda.is_available() else 0
+                        if total > 0:
+                            devices = ",".join(str(i) for i in range(total))
+                except Exception:
+                    pass
+                return f"GPU (catboost task_type=GPU, devices={devices})"
+            return "CPU (catboost)"
+
+        device = getattr(self, "device", None)
+        if device is not None:
+            return str(device)
+        if use_gpu:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    return "cuda"
+            except Exception:
+                pass
+            return "cuda (requested; backend may fall back to CPU)"
+        return "cpu"
+
+    def _print_training_device(self, context: str | None = None) -> str:
+        """Print which device will be used before training starts."""
+        device = self._resolve_training_device()
+        ctx = f" [{context}]" if context else ""
+        use_gpu = bool(getattr(self, "use_gpu", False))
+        mn = getattr(self, "model_name", None)
+        print(
+            f"Training device{ctx}: {device} "
+            f"(model_name={mn}, use_gpu={use_gpu})"
+        )
+        return device
+
+
     def train(self, n_epochs=50, metrics_list=['accuracy'], loss=None, optimizer=None, checkpoint_path='training_results'):
         """
         Metrics_list: ['r2'], ['accuracy'], ['mse', r2] or functions
@@ -1634,8 +1956,11 @@ class Model:
         class RMSprop: Optimizer that implements the RMSprop algorithm.
         class SGD: Gradient descent (with momentum) optimizer.
         """
+        self._print_training_device(context="train")
+        import time as _time
+        _method_t0 = _time.time()
         
-         # NEW: full-load single parquet path
+        # NEW: full-load single parquet path
         if getattr(self, "_single_parquet_mode", False) and not getattr(self, "_parquet_mode", False):
             # Delegate to dedicated method
             return self.train_single_parquet(n_epochs)
@@ -1873,11 +2198,41 @@ class Model:
 
 
         else:
-            if self.train_percent == 1:
+            if (self.train_percent is None) or (float(self.train_percent) >= 1.0):
                 self.__model.fit(self.x, self.y)
+                self.__y_pred = None
             else:
                 self.__model.fit(self.__x_train, self.__y_train)
                 self.__y_pred = self.__model.predict(self.__x_test)
+
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         
 
     def train_on_single_parquet_file_streaming_v4(
@@ -1901,6 +2256,9 @@ class Model:
         - Single epoch tqdm bar shows loss and percentage
         - CSV columns: epoch,batch_train_mse,train_rmse,train_r2,val_rmse,val_r2
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_v4")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -1925,10 +2283,8 @@ class Model:
             output_metrics_dir = getattr(self, "output_metrics_dir", "./results_monitor")
         os.makedirs(output_metrics_dir, exist_ok=True)
 
-        # Robust train split param
+        # Robust train split param (None or >=1 => whole-data train)
         train_ratio = getattr(self, "train_percent", None)
-        if train_ratio is None:
-            train_ratio = getattr(self, "training_percent", 0.8)
         val_ratio = getattr(self, "validation_percentage", 0.2)
 
         # -------- ParquetLoader (no tqdm inside) --------
@@ -2054,25 +2410,24 @@ class Model:
         total_rows = sum(pf.metadata.row_group(rg).num_rows for rg in range(pf.num_row_groups))
         print(f"Rows: {total_rows:,} | Features: {len(feature_cols)}")
 
-        # -------- Split row indices --------
-        from sklearn.model_selection import train_test_split
-        all_indices = np.arange(total_rows)
-        train_indices, remaining_indices = train_test_split(
-            all_indices,
-            train_size=train_ratio,
-            random_state=42
+        # -------- Split row indices (None or 1 => whole-data train, no test) --------
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
         )
-        if len(remaining_indices) > 0 and val_ratio > 0:
-            denom = max(1e-12, (1 - train_ratio))
-            val_size_relative = min(0.999, val_ratio / denom)
-            val_indices, test_indices = train_test_split(
-                remaining_indices,
-                train_size=val_size_relative,
-                random_state=42
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_percent={train_ratio!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
-        else:
-            val_indices = []
-            test_indices = remaining_indices
 
         # -------- Build loaders --------
         train_loader = ParquetLoader(
@@ -2308,6 +2663,34 @@ class Model:
         if writer:
             writer.close()
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_v4",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -2331,6 +2714,9 @@ class Model:
         - Uses model_batch_size only for model training.
         - Early stopping on validation RMSE with checkpointing.
         """
+        self._print_training_device(context="train_on_single_parquet_file_fullram")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -2589,6 +2975,34 @@ class Model:
             writer.close()
             print(f"✅ TensorBoard logs saved to {os.path.join(output_metrics_dir, 'tensorboard')}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_fullram",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -2614,6 +3028,9 @@ class Model:
         - Mini-batch progress inside each loader batch
         - CSV columns: epoch,batch_train_mse,train_rmse,train_r2,val_rmse,val_r2
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_v5")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -2786,26 +3203,24 @@ class Model:
         total_rows = sum(pf.metadata.row_group(rg).num_rows for rg in range(pf.num_row_groups))
         print(f"🗂️ Rows: {total_rows:,} | 🧩 Features: {len(feature_cols)}")
 
-        # -------- Split row indices --------
-        from sklearn.model_selection import train_test_split
-        all_indices = np.arange(total_rows)
-        train_indices, remaining_indices = train_test_split(
-            all_indices,
-            train_size=self.train_percent,
-            random_state=42
+        # -------- Split row indices (None or 1 => whole-data train, no test) --------
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=getattr(self, "train_percent", None),
+            val_ratio=getattr(self, "validation_percentage", 0.2),
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
         )
-        if len(remaining_indices) > 0 and self.validation_percentage > 0:
-            # clamp to avoid 1.0000000000000002
-            denom = max(1e-12, (1 - self.train_percent))
-            val_size_relative = min(0.999, self.validation_percentage / denom)
-            val_indices, test_indices = train_test_split(
-                remaining_indices,
-                train_size=val_size_relative,
-                random_state=42
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_percent={getattr(self, 'train_percent', None)!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
-        else:
-            val_indices = []
-            test_indices = remaining_indices
 
         print(f"🔀 Split -> train={len(train_indices):,}, val={len(val_indices):,}, test={len(test_indices):,}")
 
@@ -3182,6 +3597,34 @@ class Model:
             writer.close()
             print(f"✅ TensorBoard logs saved to {os.path.join(output_metrics_dir, 'tensorboard')}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_v5",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -3191,19 +3634,22 @@ class Model:
         *,
         target_col: str = "y",
         exclude_cols: list[str] | None = None,
-        train_ratio: float | None = None,           # defaults to self.train_percent
+        train_ratio: float | None = None,           # None or 1 => whole-data train (no test)
         val_ratio: float | None = None,             # defaults to self.validation_percentage
-        iterations: int = 2000,
-        depth: int = 8,
-        lr: float = 0.03,
+        iterations: int | None = None,
+        depth: int | None = None,
+        lr: float | None = None,
         loss_function: str | None = None,           # e.g. 'RMSE' for regression
-        early_stopping_rounds: int = 100,
+        early_stopping_rounds: int | None = None,
         output_metrics_dir: str | None = None,
         show_progress: bool = True,
     ):
         """
         Train CatBoost on a single Parquet file with tqdm progress during fit.
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_catboost")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -3214,6 +3660,31 @@ class Model:
             raise ValueError("This method is only for CatBoost models.")
         if not getattr(self, "single_parquet_path", None):
             raise ValueError("single_parquet_path not set.")
+
+        _hp = self._resolve_train_hyperparams(
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            early_stopping_rounds=early_stopping_rounds,
+        )
+        iterations = _hp["iterations"]
+        depth = _hp["depth"]
+        lr = _hp["lr"]
+        early_stopping_rounds = _hp["early_stopping_rounds"]
+
+        self._store_cv_train_config(
+            "train_on_single_parquet_file_streaming_catboost",
+            target_col=target_col,
+            exclude_cols=exclude_cols,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            loss_function=loss_function,
+            early_stopping_rounds=early_stopping_rounds,
+            show_progress=show_progress,
+        )
 
         # Resolve output directory
         if output_metrics_dir is None:
@@ -3233,41 +3704,33 @@ class Model:
             feature_cols = [c for c in feature_cols if c not in exclude_cols]
         self.feature_names_ = feature_cols
 
-        # Split indices (train/val/test) to match TabPFN subsampling behavior
+        # Split indices (train/val/test). None or 1 => train on whole file (no test).
         total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
-        from sklearn.model_selection import train_test_split
-
-        tr_ratio = float(train_ratio) if train_ratio is not None else float(getattr(self, "train_percent", 0.8))
-
-        # If val_ratio is None → disable validation; else use provided value directly on the train portion
-        use_val = (val_ratio is not None) and (float(val_ratio) > 0)
-        if use_val:
-            vl_ratio = float(val_ratio)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            topology="trainval_vs_test",
+            random_state=42,
+            val_optional=True,
+            shuffle=True,
+        )
+        train_idx = split["train_idx"]
+        val_idx = split["val_idx"]
+        test_idx = split["test_idx"]
+        tr_ratio = split["tr_ratio"]
+        use_val = split["use_val"]
+        vl_ratio = split["vl_ratio"]
+        train_on_whole = split["train_on_whole"]
+        if train_on_whole:
+            print(
+                f"🔀 train_ratio={train_ratio!r} -> training on whole data "
+                f"(no test holdout); val_ratio={vl_ratio}"
+            )
+        elif use_val:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
         else:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio=None")
-
-        all_idx = np.arange(total_rows, dtype=np.int64)
-
-        # First split: train+val vs test
-        trainval_idx, test_idx = train_test_split(
-            all_idx,
-            train_size=tr_ratio,
-            random_state=42,
-            shuffle=True,
-        )
-
-        # Second split: only if validation explicitly requested (taken from the train portion)
-        if use_val:
-            train_idx, val_idx = train_test_split(
-                trainval_idx,
-                test_size=vl_ratio,
-                random_state=42,
-                shuffle=True,
-            )
-        else:
-            train_idx = trainval_idx
-            val_idx = np.array([], dtype=np.int64)
 
         print(
             f"🔄 Split -> train: {len(train_idx):,}, "
@@ -3325,6 +3788,7 @@ class Model:
             raise RuntimeError("No training rows collected.")
         X_val, y_val = _gather_by_indices(val_idx, "Load val") if val_idx.size > 0 else (None, None)
         X_test, y_test = _gather_by_indices(test_idx, "Load test") if test_idx.size > 0 else (None, None)
+        X_train, X_val, X_test = self._apply_scaler_x_to_splits(X_train, X_val, X_test)
 
         # Build CatBoost model (GPU if requested)
         from catboost import CatBoostRegressor, CatBoostClassifier, Pool
@@ -3380,7 +3844,7 @@ class Model:
                     random_seed=42,
                     verbose=1,                      # print every 100 iters (adjust)
                     metric_period=1,
-                    use_best_model=True,
+                    use_best_model=False,
                     #bootstrap_type="No",        # better for small data
                     bootstrap_type='Bernoulli',   # But set sampling frequency to 1.0
                     subsample=1.0,
@@ -3398,7 +3862,7 @@ class Model:
                     random_seed=42,
                     verbose=1,
                     metric_period=1,
-                    use_best_model=True,
+                    use_best_model=False,
                     #bootstrap_type="No",        # better for small data
                     bootstrap_type='Bernoulli',   # But set sampling frequency to 1.0
                     subsample=1.0,
@@ -3413,6 +3877,7 @@ class Model:
                     loss_function=loss_function,
                     random_seed=42,
                     verbose=True,
+                    use_best_model=False,
                     **gpu_params
                 )
             else:
@@ -3423,12 +3888,15 @@ class Model:
                     loss_function=loss_function,
                     random_seed=42,
                     verbose=True,
+                    use_best_model=False,
                     **gpu_params
                 )
 
         # Pools
         train_pool = Pool(X_train, y_train)
         eval_set = Pool(X_val, y_val) if (X_val is not None and y_val is not None and X_val.size and y_val.size) else None
+        # CatBoost requires eval_set when use_best_model=True (unlike XGBoost).
+        self.__model.set_params(use_best_model=eval_set is not None)
 
         # tqdm redirection context
         from contextlib import contextmanager
@@ -3554,11 +4022,67 @@ class Model:
         except Exception:
             pass
         print("✅ CatBoost training complete.")
-        # Keep test arrays for report() if regression
-        if is_regression and X_test is not None and y_test is not None:
+        # Predictions for report / regression_report()
+        y_train_pred = None
+        y_val_pred = None
+        y_test_pred = None
+        try:
+            if X_train is not None and y_train is not None:
+                y_train_pred = self.__model.predict(X_train)
+            if X_val is not None and y_val is not None and len(y_val) > 0:
+                y_val_pred = self.__model.predict(X_val)
+            if X_test is not None and y_test is not None and len(y_test) > 0:
+                y_test_pred = self.__model.predict(X_test)
+        except Exception as _pred_exc:
+            print(f"Warning: could not compute CatBoost predictions for report: {_pred_exc}")
+        if is_regression and y_test is not None and y_test_pred is not None:
             self.y_test = y_test
-            self.y_test_pred = self.__model.predict(X_test)
+            self.y_test_pred = y_test_pred
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_catboost",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                config={
+                    "iterations": iterations,
+                    "depth": depth,
+                    "lr": lr,
+                    "loss_function": loss_function,
+                    "early_stopping_rounds": early_stopping_rounds,
+                    "train_ratio": train_ratio,
+                    "val_ratio": val_ratio,
+                    "use_gpu": bool(getattr(self, "use_gpu", False)),
+                },
+                data_info={
+                    "n_features": len(feature_cols) if "feature_cols" in _L else None,
+                    "n_train": (len(y_train) if y_train is not None else None),
+                    "n_val": (len(y_val) if y_val is not None else None),
+                    "n_test": (len(y_test) if y_test is not None else None),
+                },
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return True
     
     
@@ -3569,11 +4093,11 @@ class Model:
         exclude_cols: list[str] | None = None,
         train_ratio: float | None = None,
         val_ratio: float | None = None,
-        iterations: int = 2000,
-        depth: int = 8,
-        lr: float = 0.03,
+        iterations: int | None = None,
+        depth: int | None = None,
+        lr: float | None = None,
         loss_function: str | None = None,
-        early_stopping_rounds: int = 100,
+        early_stopping_rounds: int | None = None,
         output_metrics_dir: str | None = None,
         show_progress: bool = True,
         enforce_rso_cap: bool = True,          # NEW: clip predictions AFTER training (post-processing)
@@ -3588,6 +4112,9 @@ class Model:
         learns not to exceed RSO. Final predictions can still be (rarely) above RSO, so
         enforce_rso_cap (post-training) will clip them.
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_catboost_rso")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -3598,6 +4125,17 @@ class Model:
             raise ValueError("This method is only for CatBoost models.")
         if not getattr(self, "single_parquet_path", None):
             raise ValueError("single_parquet_path not set.")
+
+        _hp = self._resolve_train_hyperparams(
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            early_stopping_rounds=early_stopping_rounds,
+        )
+        iterations = _hp["iterations"]
+        depth = _hp["depth"]
+        lr = _hp["lr"]
+        early_stopping_rounds = _hp["early_stopping_rounds"]
 
         if output_metrics_dir is None:
             output_metrics_dir = getattr(self, "output_metrics_dir", "./results_monitor")
@@ -3626,22 +4164,27 @@ class Model:
             enforce_rso_cap_in_train = False
 
         total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
-        from sklearn.model_selection import train_test_split
-
-        if train_ratio is None:
-            train_ratio = getattr(self, "train_percent", 0.8)
-        if val_ratio is None:
-            val_ratio = getattr(self, "validation_percentage", 0.2)
-
-        all_idx = np.arange(total_rows, dtype=np.int64)
-        train_idx, rest_idx = train_test_split(all_idx, train_size=train_ratio, random_state=42)
-        if len(rest_idx) > 0 and val_ratio and val_ratio > 0:
-            denom = max(1e-12, (1 - train_ratio))
-            val_rel = min(0.999, val_ratio / denom)
-            val_idx, test_idx = train_test_split(rest_idx, train_size=val_rel, random_state=42)
-        else:
-            val_idx = np.array([], dtype=np.int64)
-            test_idx = rest_idx
+        # None or 1 => whole-data train (no test). val_ratio defaults to validation_percentage.
+        _val = val_ratio if val_ratio is not None else getattr(self, "validation_percentage", 0.2)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=_val,
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
+        )
+        train_idx = split["train_idx"]
+        val_idx = split["val_idx"]
+        test_idx = split["test_idx"]
+        train_ratio = split["tr_ratio"]
+        val_ratio = split["vl_ratio"] if split["use_val"] else 0.0
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_ratio=None/1 -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
+            )
 
         print("🗂️  Parquet rows: {:,} | 🧩 Features: {}".format(total_rows, len(feature_cols)))
         print(f"Features: {feature_cols}")
@@ -3698,6 +4241,9 @@ class Model:
             print(f"🔒 Applied in-training RSO cap to targets (train violations clipped: {original_violations:,}).")
         # ========================================================================
 
+        # Scale after RSO capping so cap compares physical units
+        X_train, X_val, X_test = self._apply_scaler_x_to_splits(X_train, X_val, X_test)
+
         from catboost import CatBoostRegressor, CatBoostClassifier, Pool
         is_regression = (self.__task != 'c')
         if loss_function is None:
@@ -3741,7 +4287,7 @@ class Model:
                     random_seed=42,
                     verbose=1,
                     metric_period=1,
-                    use_best_model=True,
+                    use_best_model=False,
                     bootstrap_type='Bernoulli',
                     subsample=1.0,
                     **gpu_params
@@ -3757,7 +4303,7 @@ class Model:
                     random_seed=42,
                     verbose=1,
                     metric_period=1,
-                    use_best_model=True,
+                    use_best_model=False,
                     bootstrap_type='Bernoulli',
                     subsample=1.0,
                     **gpu_params
@@ -3771,6 +4317,7 @@ class Model:
                     loss_function=loss_function,
                     random_seed=42,
                     verbose=1,
+                    use_best_model=False,
                     **gpu_params
                 )
             else:
@@ -3781,11 +4328,14 @@ class Model:
                     loss_function=loss_function,
                     random_seed=42,
                     verbose=1,
+                    use_best_model=False,
                     **gpu_params
                 )
 
         train_pool = Pool(X_train, y_train)
         eval_set = Pool(X_val, y_val) if (X_val is not None and y_val is not None and X_val.size and y_val.size) else None
+        # CatBoost requires eval_set when use_best_model=True (unlike XGBoost).
+        self.__model.set_params(use_best_model=eval_set is not None)
 
         from contextlib import contextmanager
         import sys, re
@@ -3899,6 +4449,34 @@ class Model:
                 self.y_test_pred = raw_pred
             self.y_test = y_test
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_catboost_rso",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return True
     
     
@@ -4511,19 +5089,22 @@ class Model:
         *,
         target_col: str = "y",
         exclude_cols: list[str] | None = None,
-        train_ratio: float | None = None,           # defaults to self.train_percent
+        train_ratio: float | None = None,           # None or 1 => whole-data train (no test)
         val_ratio: float | None = None,             # defaults to self.validation_percentage
-        iterations: int = 2000,
-        depth: int = 8,
-        lr: float = 0.03,
+        iterations: int | None = None,
+        depth: int | None = None,
+        lr: float | None = None,
         loss_function: str | None = None,           # e.g. 'RMSE' for regression
-        early_stopping_rounds: int = 100,
+        early_stopping_rounds: int | None = None,
         output_metrics_dir: str | None = None,
         show_progress: bool = True,
     ):
         """
         Train CatBoost on a single Parquet file with tqdm progress during fit.
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_catboost_v1")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -4534,6 +5115,17 @@ class Model:
             raise ValueError("This method is only for CatBoost models.")
         if not getattr(self, "single_parquet_path", None):
             raise ValueError("single_parquet_path not set.")
+
+        _hp = self._resolve_train_hyperparams(
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            early_stopping_rounds=early_stopping_rounds,
+        )
+        iterations = _hp["iterations"]
+        depth = _hp["depth"]
+        lr = _hp["lr"]
+        early_stopping_rounds = _hp["early_stopping_rounds"]
 
         # Resolve output directory
         if output_metrics_dir is None:
@@ -4553,24 +5145,28 @@ class Model:
             feature_cols = [c for c in feature_cols if c not in exclude_cols]
         self.feature_names_ = feature_cols
 
-        # Split indices (train/val/test) by row count
+        # Split indices (train/val/test) by row count. None or 1 => whole-data train.
         total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
-        from sklearn.model_selection import train_test_split
-
-        if train_ratio is None:
-            train_ratio = getattr(self, "train_percent", 0.8)
-        if val_ratio is None:
-            val_ratio = getattr(self, "validation_percentage", 0.2)
-
-        all_idx = np.arange(total_rows, dtype=np.int64)
-        train_idx, rest_idx = train_test_split(all_idx, train_size=train_ratio, random_state=42)
-        if len(rest_idx) > 0 and val_ratio and val_ratio > 0:
-            denom = max(1e-12, (1 - train_ratio))
-            val_rel = min(0.999, val_ratio / denom)
-            val_idx, test_idx = train_test_split(rest_idx, train_size=val_rel, random_state=42)
-        else:
-            val_idx = np.array([], dtype=np.int64)
-            test_idx = rest_idx
+        _val = val_ratio if val_ratio is not None else getattr(self, "validation_percentage", 0.2)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=_val,
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
+        )
+        train_idx = split["train_idx"]
+        val_idx = split["val_idx"]
+        test_idx = split["test_idx"]
+        train_ratio = split["tr_ratio"]
+        val_ratio = split["vl_ratio"] if split["use_val"] else 0.0
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_ratio=None/1 -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
+            )
 
         print(f"Split: train={len(train_idx):,}, val={len(val_idx):,}, test={len(test_idx):,}")
 
@@ -4620,6 +5216,7 @@ class Model:
             raise RuntimeError("No training rows collected.")
         X_val, y_val = _gather_by_indices(val_idx, "Load val") if val_idx.size > 0 else (None, None)
         X_test, y_test = _gather_by_indices(test_idx, "Load test") if test_idx.size > 0 else (None, None)
+        X_train, X_val, X_test = self._apply_scaler_x_to_splits(X_train, X_val, X_test)
 
         # Build CatBoost model (GPU if requested)
         from catboost import CatBoostRegressor, CatBoostClassifier, Pool
@@ -4694,6 +5291,8 @@ class Model:
         # Pools
         train_pool = Pool(X_train, y_train)
         eval_set = Pool(X_val, y_val) if (X_val is not None and y_val is not None and X_val.size and y_val.size) else None
+        # CatBoost requires eval_set when use_best_model=True (unlike XGBoost).
+        self.__model.set_params(use_best_model=eval_set is not None)
 
         # tqdm redirection context
         from contextlib import contextmanager
@@ -4841,6 +5440,34 @@ class Model:
             self.y_test = y_test
             self.y_test_pred = self.__model.predict(X_test)
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_catboost_v1",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return True
     
     
@@ -4850,13 +5477,13 @@ class Model:
         target_col: str = "y",
         exclude_cols: list[str] | None = None,
         data_loading_batch_size: int = 1_000_000,   # rows per IO batch (used only to chunk reads)
-        train_ratio: float | None = None,           # defaults to self.train_percent
+        train_ratio: float | None = None,           # None or 1 => whole-data train (no test)
         val_ratio: float | None = None,             # defaults to self.validation_percentage
-        iterations: int = 2000,
-        depth: int = 8,
-        lr: float = 0.03,
+        iterations: int | None = None,
+        depth: int | None = None,
+        lr: float | None = None,
         loss_function: str | None = None,           # e.g. 'RMSE' for regression
-        early_stopping_rounds: int = 100,
+        early_stopping_rounds: int | None = None,
         output_metrics_dir: str | None = None,
         overwrite_history: bool = True,
         show_progress: bool = True,
@@ -4865,6 +5492,9 @@ class Model:
         Train CatBoost on a single Parquet file.
         Reads the Parquet in batches, accumulates numpy arrays, and fits CatBoost with eval_set.
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_catboost_old")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import numpy as np
         import pandas as pd
@@ -4875,6 +5505,17 @@ class Model:
             raise ValueError("This method is only for CatBoost models.")
         if not getattr(self, "single_parquet_path", None):
             raise ValueError("single_parquet_path not set.")
+
+        _hp = self._resolve_train_hyperparams(
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            early_stopping_rounds=early_stopping_rounds,
+        )
+        iterations = _hp["iterations"]
+        depth = _hp["depth"]
+        lr = _hp["lr"]
+        early_stopping_rounds = _hp["early_stopping_rounds"]
 
         # Resolve output directory
         if output_metrics_dir is None:
@@ -4894,25 +5535,29 @@ class Model:
             feature_cols = [c for c in feature_cols if c not in exclude_cols]
         self.feature_names_ = feature_cols
 
-        # Split indices (train/val/test) by row count
+        # Split indices (train/val/test) by row count. None or 1 => whole-data train.
         total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
         import numpy as np
-        from sklearn.model_selection import train_test_split
-
-        if train_ratio is None:
-            train_ratio = getattr(self, "train_percent", 0.8)
-        if val_ratio is None:
-            val_ratio = getattr(self, "validation_percentage", 0.2)
-
-        all_idx = np.arange(total_rows, dtype=np.int64)
-        train_idx, rest_idx = train_test_split(all_idx, train_size=train_ratio, random_state=42)
-        if len(rest_idx) > 0 and val_ratio and val_ratio > 0:
-            denom = max(1e-12, (1 - train_ratio))
-            val_rel = min(0.999, val_ratio / denom)
-            val_idx, test_idx = train_test_split(rest_idx, train_size=val_rel, random_state=42)
-        else:
-            val_idx = np.array([], dtype=np.int64)
-            test_idx = rest_idx
+        _val = val_ratio if val_ratio is not None else getattr(self, "validation_percentage", 0.2)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=_val,
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
+        )
+        train_idx = split["train_idx"]
+        val_idx = split["val_idx"]
+        test_idx = split["test_idx"]
+        train_ratio = split["tr_ratio"]
+        val_ratio = split["vl_ratio"] if split["use_val"] else 0.0
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_ratio=None/1 -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
+            )
 
         # Helper: materialize (X,y) by iterating row-groups and taking needed rows
         def _gather_by_indices(indices: np.ndarray, desc: str):
@@ -4962,6 +5607,7 @@ class Model:
             raise RuntimeError("No training rows collected.")
         X_val, y_val = _gather_by_indices(val_idx, "Load val") if val_idx.size > 0 else (None, None)
         X_test, y_test = _gather_by_indices(test_idx, "Load test") if test_idx.size > 0 else (None, None)
+        X_train, X_val, X_test = self._apply_scaler_x_to_splits(X_train, X_val, X_test)
 
         # Build CatBoost model (reuse existing if present)
         from catboost import CatBoostRegressor, CatBoostClassifier, Pool
@@ -4988,6 +5634,8 @@ class Model:
         eval_set = None
         if X_val is not None and y_val is not None and X_val.size and y_val.size:
             eval_set = Pool(X_val, y_val)
+        # CatBoost requires eval_set when use_best_model=True (unlike XGBoost).
+        self.__model.set_params(use_best_model=eval_set is not None)
 
         # Fit with early stopping
         fit_params = dict(
@@ -5070,6 +5718,34 @@ class Model:
             self.y_test = y_test
             self.y_test_pred = self.__model.predict(X_test)
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_catboost_old",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -5090,6 +5766,9 @@ class Model:
         Train a model on a single parquet file with memory-efficient streaming.
         Now uses torch.utils.data.IterableDataset for fast multi-worker I/O and GPU overlap.
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import torch
         import torch.nn as nn
@@ -5144,26 +5823,24 @@ class Model:
         total_rows = sum(pf.metadata.row_group(rg).num_rows for rg in range(pf.num_row_groups))
         print(f"Rows: {total_rows:,} | Features: {len(feature_cols)}")
         print(f"Feature columns: {feature_cols}")
-        # Train/Val/Test split over row indices
-        from sklearn.model_selection import train_test_split
-        all_indices = np.arange(total_rows)
-
-        train_full_indices, test_indices = train_test_split(
-            all_indices,
-            train_size=self.train_percent,
-            random_state=42
+        # Train/Val/Test split over row indices (None or 1 => whole-data train, no test)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=getattr(self, "train_percent", None),
+            val_ratio=getattr(self, "validation_percentage", None),
+            topology="trainval_vs_test",
+            random_state=42,
+            val_optional=True,
+            shuffle=True,
         )
-
-        if self.validation_percentage and self.validation_percentage > 0:
-            val_size = min(0.999, float(self.validation_percentage))
-            train_indices, val_indices = train_test_split(
-                train_full_indices,
-                test_size=val_size,
-                random_state=42
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_percent={getattr(self, 'train_percent', None)!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
-        else:
-            train_indices = train_full_indices
-            val_indices = np.array([], dtype=int)
 
         print(f"Split: train={len(train_indices):,}, val={len(val_indices):,}, test={len(test_indices):,}")
 
@@ -5507,6 +6184,34 @@ class Model:
             writer.close()
             print(f"✓ TensorBoard logs saved to {os.path.join(output_metrics_dir, 'tensorboard')}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
       
     
@@ -5529,6 +6234,9 @@ class Model:
         Train a model on a single parquet file with memory-efficient streaming.
         Fixes progress overflow: clamp percentages to [0,100] and compute total_batches accurately.
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_v6")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import torch
         import torch.nn as nn
@@ -5702,29 +6410,24 @@ class Model:
         total_rows = sum(pf.metadata.row_group(rg).num_rows for rg in range(pf.num_row_groups))
         print(f"Rows: {total_rows:,} | Features: {len(feature_cols)}")
 
-        # Train/Val/Test split over row indices
-        from sklearn.model_selection import train_test_split
-        all_indices = np.arange(total_rows)
-
-        # 1) Train vs Test
-        train_full_indices, test_indices = train_test_split(
-            all_indices,
-            train_size=self.train_percent,
-            random_state=42
+        # Train/Val/Test split over row indices (None or 1 => whole-data train, no test)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=getattr(self, "train_percent", None),
+            val_ratio=getattr(self, "validation_percentage", None),
+            topology="trainval_vs_test",
+            random_state=42,
+            val_optional=True,
+            shuffle=True,
         )
-
-        # 2) From training, take validation percentage
-        if self.validation_percentage and self.validation_percentage > 0:
-            # clamp to avoid edge cases
-            val_size = min(0.999, float(self.validation_percentage))
-            train_indices, val_indices = train_test_split(
-                train_full_indices,
-                test_size=val_size,
-                random_state=42
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_percent={getattr(self, 'train_percent', None)!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
-        else:
-            train_indices = train_full_indices
-            val_indices = np.array([], dtype=int)
 
         print(f"Split: train={len(train_indices):,}, val={len(val_indices):,}, test={len(test_indices):,}")
 
@@ -6052,6 +6755,34 @@ class Model:
             writer.close()
             print(f"✓ TensorBoard logs saved to {os.path.join(output_metrics_dir, 'tensorboard')}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_v6",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -6106,6 +6837,9 @@ class Model:
         list
             Training history
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_v2")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import torch
         import torch.nn as nn
@@ -6271,31 +7005,24 @@ class Model:
         print(f"📊 Total rows in parquet file: {total_rows:,}")
         print(f"📋 Features: {len(feature_cols)} columns")
         
-        # Create train/val/test split
-        from sklearn.model_selection import train_test_split
-        
-        all_indices = np.arange(total_rows)
-        
-        # First split: train vs rest
-        train_indices, remaining_indices = train_test_split(
-            all_indices, 
-            train_size=self.train_percent,
-            random_state=42
+        # Create train/val/test split (None or 1 => whole-data train, no test)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=getattr(self, "train_percent", None),
+            val_ratio=getattr(self, "validation_percentage", 0.2),
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
         )
-        
-        # Second split: val vs test (if needed)
-        if len(remaining_indices) > 0 and self.validation_percentage > 0:
-            # Calculate relative validation size with safety check
-            val_size_relative = min(0.999, self.validation_percentage / (1 - self.train_percent))
-            
-            val_indices, test_indices = train_test_split(
-                remaining_indices,
-                train_size=val_size_relative,
-                random_state=42
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_percent={getattr(self, 'train_percent', None)!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
-        else:
-            val_indices = []
-            test_indices = remaining_indices
         
         print(f"🔄 Data split: {len(train_indices):,} train, {len(val_indices):,} validation, {len(test_indices):,} test samples")
         
@@ -6731,6 +7458,34 @@ class Model:
             writer.close()
             print(f"✅ TensorBoard logs saved to {os.path.join(output_metrics_dir, 'tensorboard')}")
         
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_v2",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -6786,6 +7541,9 @@ class Model:
         list
             Training history
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_v1")
+        import time as _time
+        _method_t0 = _time.time()
         import os
         import torch
         import torch.nn as nn
@@ -6932,31 +7690,24 @@ class Model:
         print(f"📊 Total rows in parquet file: {total_rows:,}")
         print(f"📋 Features: {len(feature_cols)} columns")
         
-        # Create train/val/test split
-        from sklearn.model_selection import train_test_split
-        
-        all_indices = np.arange(total_rows)
-        
-        # First split: train vs rest
-        train_indices, remaining_indices = train_test_split(
-            all_indices, 
-            train_size=self.train_percent,
-            random_state=42
+        # Create train/val/test split (None or 1 => whole-data train, no test)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=getattr(self, "train_percent", None),
+            val_ratio=getattr(self, "validation_percentage", 0.2),
+            topology="train_vs_rest",
+            random_state=42,
+            val_optional=False,
+            shuffle=True,
         )
-        
-        # Second split: val vs test (if needed)
-        if len(remaining_indices) > 0 and self.validation_percentage > 0:
-            # Calculate relative validation size with safety check
-            val_size_relative = min(0.999, self.validation_percentage / (1 - self.train_percent))
-            
-            val_indices, test_indices = train_test_split(
-                remaining_indices,
-                train_size=val_size_relative,
-                random_state=42
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_percent={getattr(self, 'train_percent', None)!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
-        else:
-            val_indices = []
-            test_indices = remaining_indices
         
         print(f"🔄 Data split: {len(train_indices):,} train, {len(val_indices):,} validation, {len(test_indices):,} test samples")
         
@@ -7320,6 +8071,34 @@ class Model:
             writer.close()
             print(f"✅ TensorBoard logs saved to {os.path.join(output_metrics_dir, 'tensorboard')}")
         
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_on_single_parquet_file_streaming_v1",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -7367,16 +8146,26 @@ class Model:
         self.x = X
         self.y = y
 
+        if getattr(self, "scaler_x", None) is not None:
+            self.scale_x()
+            X = self.x
+        if getattr(self, "scaler_y", None) is not None:
+            self.scale_y()
+            y = self.y
+            # keep train/test targets aligned after possible reshape
+            self.y = np.asarray(self.y).reshape(-1)
+
         from sklearn.model_selection import train_test_split
-        if self.train_percent != 1:
+        # None or >=1 => train on whole data (no test holdout)
+        if (self.train_percent is None) or (float(self.train_percent) >= 1.0):
+            self.__x_train, self.__x_test, self.__y_train, self.__y_test = self.x, None, self.y, None
+        else:
             self.__x_train, self.__x_test, self.__y_train, self.__y_test = train_test_split(
                 self.x, self.y,
                 train_size=self.train_percent,
                 test_size=1 - self.train_percent,
                 random_state=42
             )
-        else:
-            self.__x_train, self.__x_test, self.__y_train, self.__y_test = self.x, None, self.y, None
 
     
     
@@ -7402,6 +8191,9 @@ class Model:
         - Fits RandomForestTabPFN[Regressor|Classifier]
         - Saves model and metrics history CSV
         """
+        self._print_training_device(context="train_single_parquet_tabpfn_fullram")
+        import time as _time
+        _method_t0 = _time.time()
         try:
             from tabpfn_extensions import TabPFNRegressor, TabPFNClassifier
             from tabpfn_extensions.rf_pfn import (
@@ -7488,29 +8280,29 @@ class Model:
             # Regression: keep as float
             y = y_raw.astype(np.float32, copy=False)
 
-        # Ratios
-        tr_ratio = float(train_ratio) if train_ratio is not None else float(self.train_percent)
-        vl_ratio = float(val_ratio) if val_ratio is not None else float(self.validation_percentage)
-        print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
-
-        # Split: train+val vs test, then val from train portion
-        all_indices = np.arange(total_rows)
-        trainval_indices, test_indices = train_test_split(
-            all_indices,
-            train_size=tr_ratio,
+        # Ratios: None or 1 => train on whole data (no test holdout)
+        _val = val_ratio if val_ratio is not None else float(self.validation_percentage)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=_val,
+            topology="trainval_vs_test",
             random_state=42,
+            val_optional=False,
             shuffle=True,
         )
-        if vl_ratio > 0:
-            train_indices, val_indices = train_test_split(
-                trainval_indices,
-                test_size=vl_ratio,
-                random_state=42,
-                shuffle=True,
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        tr_ratio = split["tr_ratio"]
+        vl_ratio = split["vl_ratio"] if split["use_val"] else 0.0
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_ratio={train_ratio!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
         else:
-            train_indices = trainval_indices
-            val_indices = np.array([], dtype=np.int64)
+            print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
 
         print(
             f"🔄 Split -> train: {len(train_indices):,}, "
@@ -7637,6 +8429,34 @@ class Model:
         pd.DataFrame(history).to_csv(hist_path, index=False)
         print(f"✓ Saved training history -> {hist_path}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_single_parquet_tabpfn_fullram",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -7672,6 +8492,9 @@ class Model:
             If provided (>0), caps the effective number of TabPFN estimators
             used in this run to allow earlier stopping.
         """
+        self._print_training_device(context="train_single_parquet_tabpfn_streaming_subsampling")
+        import time as _time
+        _method_t0 = _time.time()
         # Prefer tabpfn_extensions for the Regressor; fall back to tabpfn for classifier
         try:
             from tabpfn_extensions import TabPFNRegressor, TabPFNClassifier
@@ -7726,43 +8549,32 @@ class Model:
         total_rows = running
         print(f"📊 Total rows: {total_rows:,} | Features: {len(feature_cols)}")
 
-        # Split (val from train portion only if val_ratio is explicitly provided)
-        all_indices = np.arange(total_rows)
-
-        tr_ratio = float(train_ratio) if train_ratio is not None else float(self.train_percent)
-
-        # If val_ratio is None → disable validation; else use the provided value
-        use_val = (val_ratio is not None) and (float(val_ratio) > 0)
-        if use_val:
-            vl_ratio = float(val_ratio)
+        # Split (val from train portion only if val_ratio is explicitly provided).
+        # None or 1 => train on whole data (no test holdout).
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            topology="trainval_vs_test",
+            random_state=42,
+            val_optional=True,
+            shuffle=True,
+        )
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        tr_ratio = split["tr_ratio"]
+        use_val = split["use_val"]
+        vl_ratio = split["vl_ratio"]
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_ratio={train_ratio!r} -> training on whole data "
+                f"(no test holdout); val_ratio={vl_ratio}"
+            )
+        elif use_val:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
         else:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio=None")
-
-        # First split: train+val vs test (skip only test split when training on all data)
-        if tr_ratio >= 1.0:
-            trainval_indices = all_indices
-            test_indices = np.array([], dtype=np.int64)
-            print("🔀 Using 100% of data for train+val (no test split)")
-        else:
-            trainval_indices, test_indices = train_test_split(
-                all_indices,
-                train_size=tr_ratio,
-                random_state=42,
-                shuffle=True,
-            )
-
-        # Second split: only if validation explicitly requested
-        if use_val:
-            train_indices, val_indices = train_test_split(
-                trainval_indices,
-                test_size=vl_ratio,
-                random_state=42,
-                shuffle=True,
-            )
-        else:
-            train_indices = trainval_indices
-            val_indices = np.array([], dtype=np.int64)
 
         print(
             f"🔄 Split -> train: {len(train_indices):,}, "
@@ -8010,6 +8822,34 @@ class Model:
         pd.DataFrame(history).to_csv(hist_path, index=False)
         print(f"✓ Saved training history -> {hist_path}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_single_parquet_tabpfn_streaming_subsampling",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
 
 
@@ -8031,6 +8871,9 @@ class Model:
         - regression ('r') via TabPFNRegressor
         - classification ('c') via TabPFNClassifier
         """
+        self._print_training_device(context="train_tabpfn_subsampling")
+        import time as _time
+        _method_t0 = _time.time()
         try:
             from tabpfn_extensions import TabPFNRegressor, TabPFNClassifier
         except Exception:
@@ -8057,18 +8900,18 @@ class Model:
             output_metrics_dir = getattr(self, "output_metrics_dir", "./model") or "./model"
         os.makedirs(output_metrics_dir, exist_ok=True)
 
-        # Use same split as __init__: train_test_split with train_percent
-        if self.train_percent != 1:
+        # None or >=1 => train on whole data (no test holdout / no test metrics)
+        if (self.train_percent is None) or (float(self.train_percent) >= 1.0):
+            X_train = np.asarray(self.x, dtype=np.float32)
+            y_train = np.asarray(self.y, dtype=np.float32)
+            X_test = None
+            y_test = None
+        else:
             X_train, X_test, y_train, y_test = train_test_split(
                 self.x, self.y,
                 train_size=self.train_percent,
                 test_size=1 - self.train_percent
             )
-        else:
-            X_train = np.asarray(self.x, dtype=np.float32)
-            y_train = np.asarray(self.y, dtype=np.float32)
-            X_test = None
-            y_test = None
 
         print(f"📊 Total rows: {len(X_train):,} train, {len(X_test) if X_test is not None else 0:,} test | Features: {X_train.shape[1]}")
 
@@ -8125,7 +8968,7 @@ class Model:
         # Fit logic mirrors `train()`
         print(f"🔧 Fitting TabPFN subsampled ensemble ({n_estimators} est.)")
         train_phase = tqdm(total=1, desc=f"Training TabPFN ({n_estimators} est.)", position=0, unit="phase")
-        if self.train_percent == 1:
+        if (self.train_percent is None) or (float(self.train_percent) >= 1.0):
             self.__model.fit(self.x, self.y)
             fit_X, fit_y = self.x, self.y
             self.__y_pred = None
@@ -8203,6 +9046,34 @@ class Model:
         pd.DataFrame(history).to_csv(hist_path, index=False)
         print(f"✓ Saved training history -> {hist_path}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_tabpfn_subsampling",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -8213,9 +9084,9 @@ class Model:
         exclude_cols: list[str] | None = None,
         train_ratio: float | None = None,
         val_ratio: float | None = None,
-        iterations: int = 2000,
-        depth: int = 8,
-        lr: float = 0.03,
+        iterations: int | None = None,
+        depth: int | None = None,
+        lr: float | None = None,
         early_stop_after_n_itiration: int | None = None,
         output_metrics_dir: str | None = None,
         show_progress: bool = True,
@@ -8223,17 +9094,25 @@ class Model:
         """
         Train XGBoost on a single Parquet file with the same streaming and split behavior
         as CatBoost/TabPFN subsampling:
-        - Split as: train+val vs test; carve validation from train only if val_ratio is provided.
+        - If ``train_ratio`` is ``None`` or ``1``, train on the whole file (no test holdout);
+          the report includes train metrics only (plus val if ``val_ratio`` is set).
+        - Otherwise split as: train+val vs test; carve validation from train only if
+          ``val_ratio`` is provided.
         - Stream row-groups to materialize (X, y) splits.
         - Fit an XGBoost Reg/Clf with optional early stopping when validation exists.
-        - Save per-iteration metrics CSV, store test predictions for regression.
+        - Save per-iteration metrics CSV, store test predictions for regression when a
+          test split exists.
 
         Parameters
         ----------
+        train_ratio : float, optional
+            Fraction of rows used for train(+val). ``None`` or ``1`` => use all rows
+            for training and skip test metrics.
         early_stop_after_n_itiration : int, optional
             XGBoost early stopping rounds. Effective only when validation
             data is available (val_ratio > 0).
         """
+        self._print_training_device(context="train_on_single_parquet_file_streaming_xgboost")
         import os
         import numpy as np
         import pandas as pd
@@ -8247,6 +9126,33 @@ class Model:
 
         if not getattr(self, "single_parquet_path", None):
             raise ValueError("single_parquet_path not set.")
+
+        _hp = self._resolve_train_hyperparams(
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            early_stop_after_n_itiration=early_stop_after_n_itiration,
+        )
+        iterations = _hp["iterations"]
+        depth = _hp["depth"]
+        lr = _hp["lr"]
+        early_stop_after_n_itiration = _hp["early_stop_after_n_itiration"]
+
+        self._store_cv_train_config(
+            "train_on_single_parquet_file_streaming_xgboost",
+            target_col=target_col,
+            exclude_cols=exclude_cols,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            iterations=iterations,
+            depth=depth,
+            lr=lr,
+            early_stop_after_n_itiration=early_stop_after_n_itiration,
+            show_progress=show_progress,
+        )
+
+        import time as _time
+        _method_t0 = _time.time()
 
         if output_metrics_dir is None:
             output_metrics_dir = getattr(self, "output_metrics_dir", "./results_monitor") or "./results_monitor"
@@ -8269,32 +9175,32 @@ class Model:
         total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
         print(f"📊 Total rows: {total_rows:,} | Features: {len(feature_cols)}")
 
-        # Split logic: match TabPFN subsampling (val only if explicitly provided)
-        tr_ratio = float(train_ratio) if train_ratio is not None else float(getattr(self, "train_percent", 0.8))
-        use_val = (val_ratio is not None) and (float(val_ratio) > 0)
-        if use_val:
-            vl_ratio = float(val_ratio)
+        # None or 1 => train on whole file (no test holdout / no test metrics)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            topology="trainval_vs_test",
+            random_state=42,
+            val_optional=True,
+            shuffle=True,
+        )
+        train_idx = split["train_idx"]
+        val_idx = split["val_idx"]
+        test_idx = split["test_idx"]
+        tr_ratio = split["tr_ratio"]
+        use_val = split["use_val"]
+        vl_ratio = split["vl_ratio"]
+        train_on_whole = split["train_on_whole"]
+        if train_on_whole:
+            print(
+                f"🔀 train_ratio={train_ratio!r} -> training on whole data "
+                f"(no test holdout); val_ratio={vl_ratio}"
+            )
+        elif use_val:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
         else:
             print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio=None")
-
-        all_idx = np.arange(total_rows, dtype=np.int64)
-        trainval_idx, test_idx = train_test_split(
-            all_idx,
-            train_size=tr_ratio,
-            random_state=42,
-            shuffle=True,
-        )
-        if use_val:
-            train_idx, val_idx = train_test_split(
-                trainval_idx,
-                test_size=vl_ratio,
-                random_state=42,
-                shuffle=True,
-            )
-        else:
-            train_idx = trainval_idx
-            val_idx = np.array([], dtype=np.int64)
 
         print(f"🔄 Split -> train: {len(train_idx):,}, val: {len(val_idx):,}, test: {len(test_idx):,}")
 
@@ -8347,12 +9253,15 @@ class Model:
             raise RuntimeError("No training rows collected.")
         X_val, y_val = _gather_by_indices(val_idx, "Load val") if val_idx.size > 0 else (None, None)
         X_test, y_test = _gather_by_indices(test_idx, "Load test") if test_idx.size > 0 else (None, None)
+        X_train, X_val, X_test = self._apply_scaler_x_to_splits(X_train, X_val, X_test)
 
         self._print_feature_vector_example(
             X_train,
             feature_names=feature_cols,
             context="training (xgboost_streaming)",
             once_key="train_xgboost_streaming",
+            y_data=y_train,
+            target_name=target_col,
         )
 
         # Task detection
@@ -8450,10 +9359,13 @@ class Model:
             )
        
 
+        _fit_t0 = _time.time()
         model.fit(X_train, y_train, **fit_kwargs)
+        train_time_sec = _time.time() - _fit_t0
         self.__model = model
 
         # Save per-iteration metrics, if available
+        iter_metrics_path = None
         try:
             evals_result = model.evals_result()
             rows = []
@@ -8474,15 +9386,95 @@ class Model:
                             row[f"{sp}_{mk}"] = vals[i]
                 rows.append(row)
             if rows:
-                pd.DataFrame(rows).to_csv(os.path.join(output_metrics_dir, "xgboost_iteration_metrics.csv"), index=False)
-                print(f"✅ XGBoost iteration metrics saved to {os.path.join(output_metrics_dir, 'xgboost_iteration_metrics.csv')}")
+                iter_metrics_path = os.path.join(output_metrics_dir, "xgboost_iteration_metrics.csv")
+                pd.DataFrame(rows).to_csv(iter_metrics_path, index=False)
+                print(f"✅ XGBoost iteration metrics saved to {iter_metrics_path}")
         except Exception:
             pass
 
-        # Keep test arrays for report() if regression
-        if not is_classification and X_test is not None and y_test is not None:
+        # Predictions + holdout arrays for report / regression_report()
+        y_train_pred = model.predict(X_train)
+        y_val_pred = model.predict(X_val) if X_val is not None and y_val is not None and len(y_val) > 0 else None
+        y_test_pred = (
+            model.predict(X_test)
+            if (not train_on_whole) and X_test is not None and y_test is not None and len(y_test) > 0
+            else None
+        )
+        if not is_classification and y_test_pred is not None:
             self.y_test = y_test
-            self.y_test_pred = model.predict(X_test)
+            self.y_test_pred = y_test_pred
+        else:
+            # Avoid stale holdout arrays when training on whole data / no test split
+            self.y_test = None
+            self.y_test_pred = None
+
+        task_code = "c" if is_classification else "r"
+        metrics_parts = []
+        metrics_parts.append("[train]\n" + self._format_split_metrics(y_train, y_train_pred, task_code))
+        if y_val_pred is not None:
+            metrics_parts.append("[val]\n" + self._format_split_metrics(y_val, y_val_pred, task_code))
+        if y_test_pred is not None:
+            metrics_parts.append("[test]\n" + self._format_split_metrics(y_test, y_test_pred, task_code))
+        elif train_on_whole:
+            metrics_parts.append(
+                "[test]\nskipped (train_ratio is None or 1: trained on whole data)\n"
+            )
+
+        total_time_sec = _time.time() - _method_t0
+        self._write_training_report(
+            output_metrics_dir,
+            method_name="train_on_single_parquet_file_streaming_xgboost",
+            sections=[
+                (
+                    "Config",
+                    {
+                        "iterations": iterations,
+                        "depth": depth,
+                        "lr": lr,
+                        "early_stop_after_n_itiration": early_stop_after_n_itiration,
+                        "use_gpu": use_gpu,
+                        "scaler_x_name": getattr(self, "scaler_x_name", None),
+                        "xgb_version": xgb_version,
+                        "objective": objective,
+                        "eval_metric": eval_metric,
+                        "tree_method": params_common.get("tree_method"),
+                        "device": params_common.get("device"),
+                    },
+                ),
+                (
+                    "Data / splits",
+                    {
+                        "parquet": self.single_parquet_path,
+                        "target_col": target_col,
+                        "n_features": len(feature_cols),
+                        "feature_cols": feature_cols,
+                        "exclude_cols": exclude_cols,
+                        "total_rows": total_rows,
+                        "train_rows": len(train_idx),
+                        "val_rows": len(val_idx),
+                        "test_rows": len(test_idx),
+                        "train_ratio": tr_ratio,
+                        "train_ratio_arg": train_ratio,
+                        "train_on_whole": train_on_whole,
+                        "val_ratio": (float(val_ratio) if use_val else None),
+                    },
+                ),
+                (
+                    "Timing",
+                    {
+                        "train_time_sec": round(train_time_sec, 6),
+                        "total_method_time_sec": round(total_time_sec, 6),
+                    },
+                ),
+                ("Metrics", "".join(metrics_parts)),
+                (
+                    "Artifacts",
+                    {
+                        "xgboost_iteration_metrics.csv": iter_metrics_path,
+                    },
+                ),
+            ],
+        )
 
         print("✅ XGBoost training complete.")
         return True
@@ -8519,6 +9511,9 @@ class Model:
         - Fits RandomForestTabPFN[Regressor|Classifier].
         - Saves model and metrics history CSV.
         """
+        self._print_training_device(context="train_single_parquet_tabpfn_streaming_rf")
+        import time as _time
+        _method_t0 = _time.time()
         
         try:
             from tabpfn_extensions import TabPFNRegressor, TabPFNClassifier
@@ -8576,37 +9571,29 @@ class Model:
         total_rows = running
         print(f"📊 Total rows: {total_rows:,} | Features: {len(feature_cols)}")
 
-        # Split indices
-        all_indices = np.arange(total_rows)
-        tr_ratio = float(train_ratio) if train_ratio is not None else float(self.train_percent)
-        vl_ratio = float(val_ratio) if val_ratio is not None else float(self.validation_percentage)
-
-        print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
-
-        # First split: train+val vs test
-        trainval_indices, test_indices = train_test_split(
-            all_indices,
-            train_size=tr_ratio,
+        # Split indices. None or 1 => train on whole data (no test holdout).
+        _val = val_ratio if val_ratio is not None else float(self.validation_percentage)
+        split = Model._resolve_train_val_test_indices(
+            total_rows,
+            train_ratio=train_ratio,
+            val_ratio=_val,
+            topology="trainval_vs_test",
             random_state=42,
+            val_optional=False,
             shuffle=True,
         )
-
-        # Second split: take validation from the training set (if requested)
-        if vl_ratio > 0:
-            train_indices, val_indices = train_test_split(
-                trainval_indices,
-                test_size=vl_ratio,
-                random_state=42,
-                shuffle=True,
+        train_indices = split["train_idx"]
+        val_indices = split["val_idx"]
+        test_indices = split["test_idx"]
+        tr_ratio = split["tr_ratio"]
+        vl_ratio = split["vl_ratio"] if split["use_val"] else 0.0
+        if split["train_on_whole"]:
+            print(
+                f"🔀 train_ratio={train_ratio!r} -> training on whole data "
+                f"(no test holdout); val_ratio={split['vl_ratio']}"
             )
         else:
-            train_indices = trainval_indices
-            val_indices = np.array([], dtype=np.int64)
-
-        print(
-            f"🔄 Split -> train: {len(train_indices):,}, "
-            f"val: {len(val_indices):,}, test: {len(test_indices):,}"
-        )
+            print(f"🔀 Splitting data with train_ratio={tr_ratio}, val_ratio={vl_ratio}")
 
         print(
             f"🔄 Split -> train: {len(train_indices):,}, "
@@ -8819,6 +9806,34 @@ class Model:
         pd.DataFrame(history).to_csv(hist_path, index=False)
         print(f"✓ Saved training history -> {hist_path}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_single_parquet_tabpfn_streaming_rf",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -8835,6 +9850,9 @@ class Model:
         adaptive_tree: bool = True,
         verbose: int = 1,
     ):
+        self._print_training_device(context="train_single_parquet_tabpfn")
+        import time as _time
+        _method_t0 = _time.time()
         try:
             from tabpfn_extensions import TabPFNRegressor
             from tabpfn_extensions.rf_pfn import RandomForestTabPFNRegressor
@@ -8929,6 +9947,34 @@ class Model:
         pd.DataFrame(history).to_csv(history_path, index=False)
         print(f"✓ Saved training history to {history_path}")
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_single_parquet_tabpfn",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -8949,6 +9995,9 @@ class Model:
         - Best model checkpoint
         - Optional TensorBoard (per batch loss + epoch metrics)
         """
+        self._print_training_device(context="train_single_parquet")
+        import time as _time
+        _method_t0 = _time.time()
         import numpy as np, os
         import torch, torch.nn as nn
         from torch.utils.data import TensorDataset, DataLoader
@@ -9019,8 +10068,9 @@ class Model:
         # Non-tabformer: just fit (no early stopping logic)
         if self.model_name != 'tabformer':
             
-            if self.train_percent == 1:
+            if (self.train_percent is None) or (float(self.train_percent) >= 1.0):
                 self.__model.fit(self.x, self.y)
+                self.__y_pred = None
             else:
                 self.__model.fit(self.__x_train, self.__y_train)
                 if self.__x_test is not None:
@@ -9247,6 +10297,34 @@ class Model:
             print(f"  To view: tensorboard --logdir={self.output_metrics_dir}/tensorboard")
             
             
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_single_parquet",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     def train_single_parquet_v1(
@@ -9262,6 +10340,9 @@ class Model:
         Loads file once, splits into train/val/test like classic in‑memory path
         and trains TabFormer (PyTorch) or classic ML model.
         """
+        self._print_training_device(context="train_single_parquet_v1")
+        import time as _time
+        _method_t0 = _time.time()
         import numpy as np
         import torch
         import torch.nn as nn
@@ -9285,8 +10366,9 @@ class Model:
 
         # If classic ML (non tabformer) just fit once
         if self.model_name != 'tabformer':
-            if self.train_percent == 1:
+            if (self.train_percent is None) or (float(self.train_percent) >= 1.0):
                 self.__model.fit(self.x, self.y)
+                self.__y_pred = None
             else:
                 self.__model.fit(self.__x_train, self.__y_train)
                 if self.__x_test is not None:
@@ -9412,6 +10494,34 @@ class Model:
         import pandas as pd
         pd.DataFrame(training_history).to_csv("training_history_single_parquet.csv", index=False)
         print("Saved training_history_single_parquet.csv")
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_single_parquet_v1",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return training_history
     
     
@@ -9434,6 +10544,9 @@ class Model:
         - Model checkpointing to save best model
         - TensorBoard logging of metrics
         """
+        self._print_training_device(context="train_streaming")
+        import time as _time
+        _method_t0 = _time.time()
         import torch
         import torch.nn as nn
         import numpy as np
@@ -9663,6 +10776,34 @@ class Model:
             print(f"✓ TensorBoard logs saved to {log_dir}")
             print(f"  To view: tensorboard --logdir={output_metrics_dir}/tensorboard")
         
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_streaming",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     
@@ -9677,6 +10818,9 @@ class Model:
         train_r2=..., train_rmse=..., val_r2=..., val_rmse=...
         per epoch, similar to the in-memory `train()` method.
         """
+        self._print_training_device(context="train_streaming_v1")
+        import time as _time
+        _method_t0 = _time.time()
         import torch
         import torch.nn as nn
         import numpy as np
@@ -9796,6 +10940,35 @@ class Model:
                 self.y_test = None  # you can fill these if you want full arrays
                 self.y_test_pred = None
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_streaming_v1",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
+
 
     def train_streaming_old(
         self,
@@ -9806,6 +10979,9 @@ class Model:
         checkpoint_path: str = "best_model",
         output_metrics_dir: str | None = "./model",
     ):
+        self._print_training_device(context="train_streaming_old")
+        import time as _time
+        _method_t0 = _time.time()
         import torch, torch.nn as nn, numpy as np, pandas as pd, os
         from tqdm.auto import tqdm
         from sklearn.metrics import mean_squared_error, r2_score
@@ -9997,6 +11173,34 @@ class Model:
         if self.use_accelerate:
             self.accelerator.wait_for_everyone()
 
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_streaming_old",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history    
     
     def train_streaming_ml(
@@ -10015,6 +11219,9 @@ class Model:
             log_every: How often to log batch progress
             **model_params: Additional model-specific parameters
         """
+        self._print_training_device(context="train_streaming_ml")
+        import time as _time
+        _method_t0 = _time.time()
         import numpy as np
         import pandas as pd
         from tqdm.auto import tqdm
@@ -10216,39 +11423,75 @@ class Model:
                 self.y_test = None  # Could collect full arrays if needed
                 self.y_test_pred = None
         
+        # Training report (numpy-safe; never use ``array or fallback``)
+        try:
+            _L = locals()
+            self._emit_training_report_auto(
+                method_name="train_streaming_ml",
+                method_t0=_method_t0,
+                output_metrics_dir=_L.get("output_metrics_dir"),
+                y_train=_L.get("y_train"),
+                y_train_pred=self._first_defined(_L.get("y_train_pred"), _L.get("train_pred"), _L.get("y_pred_tr")),
+                y_val=_L.get("y_val"),
+                y_val_pred=self._first_defined(_L.get("y_val_pred"), _L.get("val_pred"), _L.get("y_pred_val")),
+                y_test=self._first_defined(_L.get("y_test"), getattr(self, "y_test", None), getattr(self, "_Model__y_test", None)),
+                y_test_pred=self._first_defined(
+                    _L.get("y_test_pred"),
+                    _L.get("y_pred_te"),
+                    _L.get("te_pred"),
+                    getattr(self, "y_test_pred", None),
+                    getattr(self, "_Model__y_pred", None),
+                ),
+                artifact_paths={
+                    k: _L[k]
+                    for k in ("csv_path", "history_path", "iter_metrics_path", "batch_loss_csv", "tblog", "tensorboard_dir")
+                    if k in _L and _L[k] is not None
+                },
+                time_module=_time,
+            )
+        except Exception as _report_exc:
+            print(f"Warning: could not write training report: {_report_exc}")
         return history
     
     def scale_x(self):
         """
-        Scale the train/test features using the provided scaler.
-        - Fits scaler on training data only.
-        - Applies transform to both train and test.
-        - Converts numpy arrays to PyTorch tensors for model training.
+        Scale the in-memory feature matrix ``self.x`` using ``scaler_x``.
+        For parquet/streaming modes where ``self.x`` is not loaded yet, scaling is
+        applied later via ``_apply_scaler_x_to_splits`` during train*.
         """
         if self.scaler_x is None:
             raise ValueError("No scaler provided. Pass one when initializing the class.")
-
-        # Fit only on train, then transform both
+        if not Model._is_feature_matrix(self.x):
+            raise ValueError(
+                "Cannot scale_x: self.x is not a loaded feature matrix "
+                "(parquet/streaming mode). Scaling will run during train* instead."
+            )
         self.x = self.scaler_x.fit_transform(self.x)
         
 
 
     def scale_y(self):
         """
-        Scale the train/test targets using the provided scaler.
-        - Fits scaler on training data only.
-        - Applies transform to both train and test.
-        - Converts numpy arrays to PyTorch tensors for model training.
+        Scale the in-memory target ``self.y`` using ``scaler_y``.
         """
         if self.scaler_y is None:
             raise ValueError("No scaler provided. Pass one when initializing the class.")
+        if self.y is None or (
+            isinstance(self.y, float) and np.isnan(self.y)
+        ) or (
+            not hasattr(self.y, "values") and not Model._is_feature_matrix(self.y)
+        ):
+            raise ValueError(
+                "Cannot scale_y: self.y is not a loaded target "
+                "(parquet/streaming mode)."
+            )
 
         # Fit only on train, then transform both
         # convert self.y series to nd array if its a series
         if hasattr(self.y, "values"):
             self.y = self.scaler_y.fit_transform(self.y.values.reshape(-1, 1))
         else:
-            self.y = self.scaler_y.fit_transform(self.y.reshape(-1, 1))
+            self.y = self.scaler_y.fit_transform(np.asarray(self.y).reshape(-1, 1))
 
     def summary(self):
         print(self.__model.summary())
@@ -10257,6 +11500,10 @@ class Model:
     def predict(self, x_to_pred, batch_size=None, show_progress=True):
         from tqdm import tqdm
         import numpy as np
+
+        # Match training-time feature scaling when scaler_x was fitted
+        if self._scaler_x_is_fitted():
+            x_to_pred = self.scaler_x.transform(x_to_pred)
 
         self._print_feature_vector_example(
             x_to_pred,
@@ -10314,6 +11561,198 @@ class Model:
 
     def f1_score(self):
         return f1_score(self.__y_test, self.__y_pred)
+
+
+    @staticmethod
+    def _first_defined(*values):
+        """Return the first value that is not None (safe for numpy arrays)."""
+        for v in values:
+            if v is not None:
+                return v
+        return None
+
+    def _emit_training_report_auto(
+        self,
+        *,
+        method_name: str,
+        method_t0: float,
+        output_metrics_dir=None,
+        config=None,
+        data_info=None,
+        y_train=None,
+        y_train_pred=None,
+        y_val=None,
+        y_val_pred=None,
+        y_test=None,
+        y_test_pred=None,
+        artifact_paths=None,
+        extra_sections=None,
+        time_module=None,
+    ):
+        """Build and write ``report.txt`` without using truthiness on numpy arrays."""
+        import os
+        import time as _time_mod
+
+        time_module = time_module or _time_mod
+        report_dir = output_metrics_dir or getattr(self, "output_metrics_dir", "./results_monitor") or "./results_monitor"
+        os.makedirs(report_dir, exist_ok=True)
+
+        sections = [
+            ("Timing", {"total_method_time_sec": round(time_module.time() - method_t0, 6)}),
+        ]
+        if config:
+            sections.append(("Config", config))
+        if data_info:
+            sections.append(("Data / splits", data_info))
+
+        task = getattr(self, "_Model__task", getattr(self, "__task", "r"))
+        metric_bits = []
+        for split_name, yt, yp in (
+            ("train", y_train, y_train_pred),
+            ("val", y_val, y_val_pred),
+            ("test", y_test, y_test_pred),
+        ):
+            if yt is None or yp is None:
+                continue
+            try:
+                metric_bits.append(f"[{split_name}]\n" + self._format_split_metrics(yt, yp, task))
+            except Exception as exc:
+                metric_bits.append(f"[{split_name}]\n(failed to compute metrics: {exc})\n")
+        if metric_bits:
+            sections.append(("Metrics", "".join(metric_bits)))
+
+        artifacts = dict(artifact_paths or {})
+        for fname in (
+            "streaming_training_history.csv",
+            "fullram_training_history.csv",
+            "catboost_iteration_metrics.csv",
+            "catboost_streaming_history.csv",
+            "xgboost_iteration_metrics.csv",
+            "batch_losses.csv",
+        ):
+            p = os.path.join(report_dir, fname)
+            if os.path.isfile(p):
+                artifacts[fname] = p
+        tb = os.path.join(report_dir, "tensorboard")
+        if os.path.isdir(tb):
+            artifacts["tensorboard"] = tb
+        if artifacts:
+            sections.append(("Artifacts", artifacts))
+        if extra_sections:
+            sections.extend(extra_sections)
+
+        return self._write_training_report(
+            report_dir,
+            method_name=method_name,
+            sections=sections,
+        )
+
+    def _format_split_metrics(self, y_true, y_pred, task="r"):
+        """Format train/val/test metrics as a text block for ``report.txt``."""
+        import numpy as np
+        from math import sqrt
+        from sklearn.metrics import (
+            r2_score,
+            mean_squared_error,
+            mean_absolute_error,
+            median_absolute_error,
+            accuracy_score,
+            classification_report,
+        )
+
+        if y_true is None or y_pred is None:
+            return "(no predictions available)\n"
+
+        y_true = np.asarray(y_true).reshape(-1)
+        y_pred = np.asarray(y_pred).reshape(-1)
+        if y_true.size == 0 or y_pred.size == 0:
+            return "(empty prediction arrays)\n"
+        n = min(y_true.size, y_pred.size)
+        y_true, y_pred = y_true[:n], y_pred[:n]
+
+        task_l = str(task or getattr(self, "_Model__task", getattr(self, "__task", "r"))).lower()
+        if task_l.startswith("c"):
+            lines = [
+                f"n={n}",
+                f"accuracy={float(accuracy_score(y_true, y_pred)):.6f}",
+                "",
+                classification_report(y_true, y_pred, zero_division=0),
+            ]
+            return "\n".join(lines).rstrip() + "\n"
+
+        mse_val = float(mean_squared_error(y_true, y_pred))
+        rmse_val = float(sqrt(mse_val))
+        mean_y = float(np.mean(y_true))
+        rng = float(np.max(y_true) - np.min(y_true))
+        metrics = {
+            "n": n,
+            "R2": float(r2_score(y_true, y_pred)),
+            "R": float(np.corrcoef(y_true, y_pred)[0, 1])
+            if (np.std(y_true) > 0 and np.std(y_pred) > 0)
+            else float("nan"),
+            "MSE": mse_val,
+            "RMSE": rmse_val,
+            "MAE": float(mean_absolute_error(y_true, y_pred)),
+            "MEDAE": float(median_absolute_error(y_true, y_pred)),
+            "Bias": float(np.mean(y_pred - y_true)),
+            "NRMSE_mean": (rmse_val / mean_y) if mean_y != 0 else float("nan"),
+            "NRMSE_range": (rmse_val / rng) if rng > 0 else float("nan"),
+        }
+        return "\n".join(f"{k}={v}" for k, v in metrics.items()) + "\n"
+
+    def _write_training_report(
+        self,
+        output_metrics_dir,
+        *,
+        method_name,
+        sections=None,
+        filename="report.txt",
+    ):
+        """Write a human-readable training summary to ``output_metrics_dir/report.txt``."""
+        import os
+        from datetime import datetime
+
+        if not output_metrics_dir:
+            output_metrics_dir = getattr(self, "output_metrics_dir", "./results_monitor") or "./results_monitor"
+        os.makedirs(output_metrics_dir, exist_ok=True)
+        report_path = os.path.join(output_metrics_dir, filename)
+
+        task = getattr(self, "_Model__task", getattr(self, "__task", None))
+        lines = [
+            "=" * 80,
+            "TRAINING REPORT",
+            "=" * 80,
+            f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+            f"method: {method_name}",
+            f"model_name: {getattr(self, 'model_name', None)}",
+            f"task: {task}",
+            f"parquet: {getattr(self, 'single_parquet_path', None)}",
+            f"output_metrics_dir: {output_metrics_dir}",
+            "",
+        ]
+
+        for section in sections or []:
+            if isinstance(section, (tuple, list)) and len(section) == 2:
+                title, body = section
+            elif isinstance(section, dict):
+                title = section.get("title", "Section")
+                body = section.get("body", "")
+            else:
+                continue
+            lines.append(f"--- {title} ---")
+            if isinstance(body, dict):
+                for k, v in body.items():
+                    lines.append(f"{k}: {v}")
+            else:
+                text = str(body).rstrip()
+                if text:
+                    lines.append(text)
+            lines.append("")
+
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines).rstrip() + "\n")
+        print(f"✅ Training report saved to {report_path}")
+        return report_path
 
     
     def regression_report(
@@ -10896,6 +12335,33 @@ class Model:
                 print(f"Model saved via joblib.dump to: {file_path}")
             except Exception as e:
                 print(f"Error saving model with joblib: {e}")
+
+        # Persist fitted feature/target scalers next to the model (parquet/streaming train)
+        try:
+            import joblib
+            if self._scaler_x_is_fitted():
+                sx_path = base + "_scaler_x.pkl"
+                joblib.dump(
+                    {
+                        "scaler": self.scaler_x,
+                        "scaler_name": getattr(self, "scaler_x_name", None),
+                        "feature_names": getattr(self, "feature_names_", None),
+                    },
+                    sx_path,
+                )
+                print(f"scaler_x saved to: {sx_path}")
+            if self._scaler_y_is_fitted():
+                sy_path = base + "_scaler_y.pkl"
+                joblib.dump(
+                    {
+                        "scaler": self.scaler_y,
+                        "scaler_name": getattr(self, "scaler_y_name", None),
+                    },
+                    sy_path,
+                )
+                print(f"scaler_y saved to: {sy_path}")
+        except Exception as e:
+            print(f"Warning: could not save scaler sidecar(s): {e}")
         
         return file_path  # Return the path where the model was saved for reference
     
@@ -11057,6 +12523,621 @@ class Model:
         else:
             print(f"Unsupported file extension: {ext}")
 
+        # Restore fitted scalers saved next to the model (if present)
+        try:
+            import joblib
+            base, _ = os.path.splitext(file_path)
+            sx_path = base + "_scaler_x.pkl"
+            sy_path = base + "_scaler_y.pkl"
+            if os.path.exists(sx_path):
+                payload = joblib.load(sx_path)
+                if isinstance(payload, dict) and "scaler" in payload:
+                    self.scaler_x = payload["scaler"]
+                    self.scaler_x_name = payload.get("scaler_name", getattr(self, "scaler_x_name", None))
+                    if payload.get("feature_names") is not None:
+                        self.feature_names_ = payload["feature_names"]
+                else:
+                    self.scaler_x = payload
+                print(f"scaler_x loaded from: {sx_path}")
+            if os.path.exists(sy_path):
+                payload = joblib.load(sy_path)
+                if isinstance(payload, dict) and "scaler" in payload:
+                    self.scaler_y = payload["scaler"]
+                    self.scaler_y_name = payload.get("scaler_name", getattr(self, "scaler_y_name", None))
+                else:
+                    self.scaler_y = payload
+                print(f"scaler_y loaded from: {sy_path}")
+        except Exception as e:
+            print(f"Warning: could not load scaler sidecar(s): {e}")
+
+    def perturbation_analysis(
+        self,
+        perturbation_percentages_list,
+        columns_to_perturbate_list,
+        *,
+        perturbation_method: str = "additive_std",
+        perturb_at_once: bool = True,
+        model_path: str | None = None,
+        test_data=None,
+        x_column_names: list[str] | None = None,
+        y_column_name: str | None = None,
+        data_type: str | None = None,
+        target_column_name: str | None = None,
+        exclude_cols: list[str] | None = None,
+        output_metrics_dir: str | None = None,
+        random_state: int = 42,
+        show_progress: bool = True,
+    ):
+        """
+        Feature perturbation analysis on the test set.
+
+        Requires a saved ``model_path``. Evaluates an unperturbed baseline, then
+        applies either ``additive_std`` (default) or ``multiplicative``
+        perturbation and reports metrics plus deltas vs baseline.
+
+        ``perturb_at_once``:
+          - True (default): perturb all ``columns_to_perturbate_list`` together
+            for each percentage.
+          - False: perturb one column at a time (column × percentage).
+
+        Test data priority:
+          1. If ``test_data`` is set: load via ``data_type``
+             (``dataframe`` | ``parquet`` | ``numpy``; auto-inferred if omitted).
+          2. Else prefer ``self.__x_test`` / ``self.__y_test`` when available.
+          3. Else, if ``single_parquet_path`` is set, use the holdout split
+             (``1 - train_percent``) with ``random_state``.
+
+        ``y_column_name`` aliases ``target_column_name`` (``y_column_name`` wins).
+        """
+        import os
+        import numpy as np
+        import pandas as pd
+        from tqdm.auto import tqdm
+
+        self._print_training_device(context="perturbation_analysis")
+
+        if not model_path:
+            raise ValueError(
+                "A trained model must be saved and model_path must be set for "
+                "perturbation_analysis."
+            )
+        if not os.path.exists(model_path):
+            raise ValueError(
+                "A trained model must be saved and model_path must be set for "
+                f"perturbation_analysis. File not found: {model_path}"
+            )
+
+        if perturbation_percentages_list is None or len(list(perturbation_percentages_list)) == 0:
+            raise ValueError("perturbation_percentages_list must be a non-empty list.")
+        if columns_to_perturbate_list is None or len(list(columns_to_perturbate_list)) == 0:
+            raise ValueError("columns_to_perturbate_list must be a non-empty list.")
+
+        method = str(perturbation_method or "").strip().lower()
+        if method not in ("additive_std", "multiplicative"):
+            raise ValueError(
+                "perturbation_method must be 'additive_std' or 'multiplicative'."
+            )
+
+        percentages = [float(p) for p in perturbation_percentages_list]
+        columns = [str(c) for c in columns_to_perturbate_list]
+        perturb_at_once = bool(perturb_at_once)
+
+        resolved_target = (
+            y_column_name
+            or target_column_name
+            or getattr(self, "target_column_name", None)
+            or "y"
+        )
+
+        self.load_model(model_path)
+        if getattr(self, "_Model__model", None) is None and getattr(self, "__model", None) is None:
+            raise ValueError(
+                "A trained model must be saved and model_path must be set for "
+                "perturbation_analysis. load_model did not produce a model."
+            )
+
+        out_dir = (
+            output_metrics_dir
+            or getattr(self, "output_metrics_dir", None)
+            or "./results_monitor"
+        )
+        os.makedirs(out_dir, exist_ok=True)
+
+        resolved_data_type = None
+        if test_data is not None:
+            x_test, y_test, feature_names, resolved_data_type = (
+                self._load_explicit_perturbation_test_data(
+                    test_data,
+                    data_type=data_type,
+                    x_column_names=x_column_names,
+                    y_column_name=resolved_target,
+                    exclude_cols=exclude_cols,
+                    show_progress=show_progress,
+                )
+            )
+        else:
+            x_test, y_test, feature_names = self._resolve_perturbation_test_data(
+                target_column_name=resolved_target,
+                exclude_cols=exclude_cols,
+                random_state=random_state,
+                show_progress=show_progress,
+            )
+        name_to_idx = {str(n): i for i, n in enumerate(feature_names)}
+        missing = [c for c in columns if c not in name_to_idx]
+        if missing:
+            raise ValueError(
+                f"columns_to_perturbate_list contains unknown feature(s): {missing}. "
+                f"Available: {feature_names}"
+            )
+
+        is_classification = str(getattr(self, "__task", "r")).lower().startswith("c")
+
+        def _metrics_for(x_arr, y_arr):
+            try:
+                y_pred = self.predict(x_arr, show_progress=False)
+            except Exception as e:
+                raise RuntimeError(
+                    "perturbation_analysis requires a model that supports "
+                    f"predict() on the test feature matrix: {e}"
+                ) from e
+            if is_classification:
+                return self._compute_cv_classification_metrics(
+                    y_arr, y_pred, model=getattr(self, "_Model__model", None), x_data=x_arr
+                )
+            return self._compute_cv_regression_metrics(y_arr, y_pred)
+
+        def _apply_perturbation(x_src, cols_to_apply, pct):
+            x_pert = np.array(x_src, copy=True, dtype=np.float32)
+            applied = []
+            for col_name in cols_to_apply:
+                if method == "additive_std" and col_stds.get(col_name, 0.0) == 0.0:
+                    continue
+                j = name_to_idx[col_name]
+                if method == "additive_std":
+                    x_pert[:, j] = x_pert[:, j] + (pct / 100.0) * col_stds[col_name]
+                else:
+                    x_pert[:, j] = x_pert[:, j] * (1.0 + pct / 100.0)
+                applied.append(col_name)
+            return x_pert, applied
+
+        def _append_perturbed_row(col_label, pct, metrics):
+            row = {
+                "run": "perturbed",
+                "column": col_label,
+                "percentage": pct,
+                "perturbation_method": method,
+                "perturb_at_once": perturb_at_once,
+                **metrics,
+            }
+            for key, base_val in baseline.items():
+                if key == "N":
+                    continue
+                try:
+                    row[f"delta_{key}"] = float(metrics.get(key, np.nan)) - float(base_val)
+                except (TypeError, ValueError):
+                    row[f"delta_{key}"] = np.nan
+            rows.append(row)
+
+        mode_label = "all columns at once" if perturb_at_once else "one column at a time"
+        print(
+            f"Running perturbation_analysis "
+            f"(method={method}, mode={mode_label}, n_test={len(y_test):,}, "
+            f"n_cols={len(columns)}, n_pct={len(percentages)})"
+        )
+
+        baseline = _metrics_for(x_test, y_test)
+        rows = [
+            {
+                "run": "baseline",
+                "column": None,
+                "percentage": 0.0,
+                "perturbation_method": method,
+                "perturb_at_once": perturb_at_once,
+                **baseline,
+            }
+        ]
+
+        # Precompute column stds on unperturbed test for additive_std
+        col_stds = {}
+        if method == "additive_std":
+            for c in columns:
+                j = name_to_idx[c]
+                s = float(np.std(x_test[:, j].astype(np.float64, copy=False)))
+                col_stds[c] = s
+                if s == 0.0:
+                    print(f"Warning: column '{c}' has zero std on test; additive_std skipped for it.")
+
+        if perturb_at_once:
+            for pct in tqdm(
+                percentages,
+                desc="Perturbation runs",
+                disable=not show_progress,
+            ):
+                x_pert, applied = _apply_perturbation(x_test, columns, pct)
+                if not applied:
+                    print(f"Warning: no columns perturbed at pct={pct}; skipping.")
+                    continue
+                metrics = _metrics_for(x_pert, y_test)
+                _append_perturbed_row(",".join(applied), pct, metrics)
+        else:
+            combos = [(c, p) for c in columns for p in percentages]
+            for col_name, pct in tqdm(
+                combos,
+                desc="Perturbation runs",
+                disable=not show_progress,
+            ):
+                x_pert, applied = _apply_perturbation(x_test, [col_name], pct)
+                if not applied:
+                    continue
+                metrics = _metrics_for(x_pert, y_test)
+                _append_perturbed_row(col_name, pct, metrics)
+
+        metrics_df = pd.DataFrame(rows)
+        csv_path = os.path.join(out_dir, "perturbation_analysis_metrics.csv")
+        metrics_df.to_csv(csv_path, index=False)
+
+        # Report: summarize largest |delta_R2| or |delta_RMSE| / Accuracy
+        summary_lines = []
+        delta_cols = [c for c in metrics_df.columns if c.startswith("delta_")]
+        if delta_cols and len(metrics_df) > 1:
+            pert = metrics_df[metrics_df["run"] == "perturbed"].copy()
+            prefer = None
+            for cand in ("delta_R2", "delta_RMSE", "delta_Accuracy", "delta_F1"):
+                if cand in pert.columns:
+                    prefer = cand
+                    break
+            if prefer is None:
+                prefer = delta_cols[0]
+            pert["_abs"] = pert[prefer].abs()
+            top = pert.sort_values("_abs", ascending=False).head(10)
+            summary_lines.append(f"Top |{prefer}| changes:")
+            for _, r in top.iterrows():
+                summary_lines.append(
+                    f"  column={r['column']} pct={r['percentage']}: "
+                    f"{prefer}={r[prefer]}"
+                )
+
+        test_data_source = None
+        if test_data is not None:
+            if isinstance(test_data, str):
+                test_data_source = test_data
+            elif isinstance(test_data, (tuple, list)) and len(test_data) == 2:
+                test_data_source = "explicit (X, y)"
+            else:
+                test_data_source = type(test_data).__name__
+
+        self._write_training_report(
+            out_dir,
+            method_name="perturbation_analysis",
+            filename="perturbation_analysis_report.txt",
+            sections=[
+                (
+                    "Config",
+                    {
+                        "model_path": model_path,
+                        "perturbation_method": method,
+                        "perturb_at_once": perturb_at_once,
+                        "percentages": percentages,
+                        "columns": columns,
+                        "n_test": int(len(y_test)),
+                        "feature_names": feature_names,
+                        "x_column_names": x_column_names,
+                        "y_column_name": resolved_target,
+                        "data_type": resolved_data_type or data_type,
+                        "test_data": test_data_source,
+                        "random_state": random_state,
+                        "train_percent": getattr(self, "train_percent", None),
+                    },
+                ),
+                ("Baseline metrics", baseline),
+                ("Top deltas", "\n".join(summary_lines) if summary_lines else "(n/a)"),
+                ("All runs", metrics_df.to_string(index=False)),
+            ],
+        )
+        print(f"✅ Perturbation metrics CSV saved to {csv_path}")
+        return metrics_df
+
+    def _load_explicit_perturbation_test_data(
+        self,
+        test_data,
+        *,
+        data_type: str | None = None,
+        x_column_names: list[str] | None = None,
+        y_column_name: str = "y",
+        exclude_cols: list[str] | None = None,
+        show_progress: bool = True,
+    ):
+        """
+        Load explicit test data for perturbation_analysis.
+
+        Returns (X float32, y 1d, feature_names, resolved_data_type).
+        """
+        import os
+        import numpy as np
+        import pandas as pd
+
+        def _infer_data_type(obj):
+            if isinstance(obj, str) or (
+                hasattr(obj, "__fspath__") and not hasattr(obj, "columns")
+            ):
+                return "parquet"
+            if isinstance(obj, (tuple, list)) and len(obj) == 2:
+                return "numpy"
+            if isinstance(obj, np.ndarray):
+                raise ValueError(
+                    "For data_type='numpy', pass test_data as (X, y) tuple/list."
+                )
+            if hasattr(obj, "columns") or hasattr(obj, "to_pandas") or hasattr(obj, "get_columns_names"):
+                return "dataframe"
+            if isinstance(obj, pd.DataFrame):
+                return "dataframe"
+            raise ValueError(
+                "Cannot infer data_type for test_data; set data_type to "
+                "'dataframe', 'parquet', or 'numpy'."
+            )
+
+        resolved = (data_type or _infer_data_type(test_data) or "").strip().lower()
+        if resolved not in ("dataframe", "parquet", "numpy"):
+            raise ValueError(
+                "data_type must be 'dataframe', 'parquet', or 'numpy' "
+                f"(got {data_type!r})."
+            )
+
+        resolved_exclude = (
+            exclude_cols
+            if exclude_cols is not None
+            else getattr(self, "exclude_cols", None)
+            or getattr(self, "exclude_columns", None)
+        )
+        target_col = str(y_column_name or "y")
+
+        def _feature_cols_from_names(all_names):
+            names = [str(c) for c in all_names]
+            if target_col not in names:
+                raise ValueError(
+                    f"Target column '{target_col}' not found in test_data. "
+                    f"Available: {names}"
+                )
+            if x_column_names is not None:
+                feat = [str(c) for c in x_column_names]
+                missing = [c for c in feat if c not in names]
+                if missing:
+                    raise ValueError(
+                        f"x_column_names not found in test_data: {missing}. "
+                        f"Available: {names}"
+                    )
+                return feat
+            meta_drop = {"date", "year", "month"}
+            feat = [c for c in names if c not in {target_col, *meta_drop}]
+            if resolved_exclude:
+                feat = [c for c in feat if c not in resolved_exclude]
+            if not feat:
+                raise ValueError("No feature columns resolved from test_data.")
+            return feat
+
+        def _df_to_xy(df):
+            if hasattr(df, "to_pandas") and not isinstance(df, pd.DataFrame):
+                try:
+                    df = df.to_pandas()
+                except Exception:
+                    pass
+            if not isinstance(df, pd.DataFrame):
+                # project DataFrame wrapper
+                if hasattr(df, "get_columns_names") and hasattr(df, "get_column"):
+                    cols = list(df.get_columns_names())
+                    pdf = pd.DataFrame({c: df.get_column(c) for c in cols})
+                    df = pdf
+                else:
+                    raise ValueError(
+                        "data_type='dataframe' requires a pandas DataFrame "
+                        "or compatible tabular object."
+                    )
+            feat = _feature_cols_from_names(list(df.columns))
+            x_arr = df[feat].to_numpy(dtype=np.float32, copy=True)
+            y_arr = np.asarray(df[target_col]).reshape(-1)
+            if x_arr.shape[0] != y_arr.shape[0]:
+                raise ValueError("X and y length mismatch in test_data.")
+            self.feature_names_ = feat
+            return x_arr, y_arr, feat
+
+        if resolved == "numpy":
+            if not (isinstance(test_data, (tuple, list)) and len(test_data) == 2):
+                raise ValueError(
+                    "For data_type='numpy', test_data must be a (X, y) tuple/list."
+                )
+            x_arr = np.asarray(test_data[0], dtype=np.float32)
+            y_arr = np.asarray(test_data[1]).reshape(-1)
+            if x_arr.ndim != 2:
+                raise ValueError("X in test_data must be 2-D.")
+            if x_arr.shape[0] != y_arr.shape[0]:
+                raise ValueError("X and y length mismatch in test_data.")
+            if x_column_names is not None:
+                feat = [str(c) for c in x_column_names]
+                if len(feat) != x_arr.shape[1]:
+                    raise ValueError(
+                        f"x_column_names length ({len(feat)}) must match "
+                        f"X.shape[1] ({x_arr.shape[1]})."
+                    )
+            else:
+                feat = [f"f{i}" for i in range(x_arr.shape[1])]
+            self.feature_names_ = feat
+            print(f"Perturbation test data from numpy: {len(y_arr):,} rows")
+            return x_arr, y_arr, feat, resolved
+
+        if resolved == "parquet":
+            path = os.fspath(test_data) if not isinstance(test_data, str) else test_data
+            if not os.path.exists(path):
+                raise ValueError(f"test_data parquet path not found: {path}")
+            import pyarrow.parquet as pq
+
+            # Prefer pandas for simplicity on explicit full test files
+            try:
+                df = pq.read_table(path).to_pandas()
+            except Exception:
+                df = pd.read_parquet(path)
+            if show_progress:
+                print(f"Loaded explicit parquet test_data: {path} ({len(df):,} rows)")
+            x_arr, y_arr, feat = _df_to_xy(df)
+            return x_arr, y_arr, feat, resolved
+
+        # dataframe
+        x_arr, y_arr, feat = _df_to_xy(test_data)
+        print(f"Perturbation test data from dataframe: {len(y_arr):,} rows")
+        return x_arr, y_arr, feat, resolved
+
+    def _resolve_perturbation_test_data(
+        self,
+        *,
+        target_column_name: str | None = None,
+        exclude_cols: list[str] | None = None,
+        random_state: int = 42,
+        show_progress: bool = True,
+    ):
+        """
+        Return (X_test float32 ndarray, y_test 1d, feature_names list).
+        """
+        import numpy as np
+
+        x_test = getattr(self, "_Model__x_test", None)
+        y_test = getattr(self, "_Model__y_test", None)
+        if x_test is None:
+            x_test = getattr(self, "__x_test", None)
+        if y_test is None:
+            y_test = getattr(self, "__y_test", None)
+
+        def _as_xy(x, y, feature_names=None):
+            if hasattr(x, "to_numpy"):
+                names = list(x.columns) if feature_names is None else list(feature_names)
+                x_arr = x.to_numpy(dtype=np.float32, copy=True)
+            else:
+                x_arr = np.asarray(x, dtype=np.float32)
+                if feature_names is None:
+                    feature_names = getattr(self, "feature_names_", None)
+                if feature_names is None:
+                    feature_names = [f"f{i}" for i in range(x_arr.shape[1])]
+                names = list(feature_names)
+            y_arr = np.asarray(y).reshape(-1)
+            if x_arr.ndim != 2:
+                raise ValueError("X_test must be 2-D.")
+            if x_arr.shape[0] != y_arr.shape[0]:
+                raise ValueError("X_test and y_test length mismatch.")
+            if len(names) != x_arr.shape[1]:
+                # Fall back to positional names if mismatch
+                names = [f"f{i}" for i in range(x_arr.shape[1])]
+            return x_arr, y_arr, names
+
+        # Prefer in-memory test split
+        try:
+            has_x = x_test is not None and (
+                (hasattr(x_test, "size") and x_test.size > 0)
+                or (hasattr(x_test, "__len__") and len(x_test) > 0)
+            )
+            has_y = y_test is not None and (
+                (hasattr(y_test, "size") and np.asarray(y_test).size > 0)
+                or (hasattr(y_test, "__len__") and len(y_test) > 0)
+            )
+        except Exception:
+            has_x = has_y = False
+
+        if has_x and has_y:
+            return _as_xy(x_test, y_test, getattr(self, "feature_names_", None))
+
+        # Parquet holdout via train_percent
+        if getattr(self, "single_parquet_path", None):
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            from sklearn.model_selection import train_test_split
+            from tqdm.auto import tqdm
+
+            cfg = self._get_cv_train_config(
+                target_column_name=target_column_name,
+                exclude_cols=exclude_cols,
+            )
+            target_col = cfg["target_col"]
+            resolved_exclude = cfg.get("exclude_cols")
+
+            pf = pq.ParquetFile(self.single_parquet_path, memory_map=True)
+            names = list(pf.schema_arrow.names)
+            if target_col not in names:
+                raise ValueError(f"Target column '{target_col}' not found in parquet.")
+            meta_drop = {"date", "year", "month"}
+            feature_cols = [c for c in names if c not in {target_col, *meta_drop}]
+            if resolved_exclude:
+                feature_cols = [c for c in feature_cols if c not in resolved_exclude]
+            self.feature_names_ = feature_cols
+
+            total_rows = sum(
+                pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)
+            )
+            if total_rows < 2:
+                raise ValueError("Not enough parquet rows for a train/test split.")
+
+            train_ratio = float(getattr(self, "train_percent", 0.8) or 0.8)
+            if train_ratio <= 0 or train_ratio >= 1:
+                raise ValueError(
+                    f"train_percent must be in (0, 1) for parquet holdout; got {train_ratio}."
+                )
+            all_indices = np.arange(total_rows, dtype=np.int64)
+            _, test_indices = train_test_split(
+                all_indices,
+                train_size=train_ratio,
+                random_state=int(random_state),
+            )
+            test_indices = np.asarray(test_indices, dtype=np.int64)
+            if test_indices.size == 0:
+                raise ValueError("Parquet holdout test set is empty.")
+
+            rg_bounds = []
+            acc = 0
+            for rg in range(pf.num_row_groups):
+                n = pf.metadata.row_group(rg).num_rows
+                rg_bounds.append((acc, acc + n))
+                acc += n
+
+            indices_sorted = np.sort(test_indices)
+            feat_parts, tgt_parts = [], []
+            for rg in tqdm(
+                range(pf.num_row_groups),
+                desc="Load parquet test holdout",
+                leave=False,
+                disable=not show_progress,
+            ):
+                start, end = rg_bounds[rg]
+                left = np.searchsorted(indices_sorted, start, side="left")
+                right = np.searchsorted(indices_sorted, end, side="left")
+                local = indices_sorted[left:right] - start
+                if local.size == 0:
+                    continue
+                tbl = pf.read_row_group(rg, columns=feature_cols + [target_col])
+                tbl_sel = tbl.take(pa.array(local, type=pa.int64()))
+                try:
+                    x_cols = [
+                        tbl_sel[c].to_numpy(zero_copy_only=False) for c in feature_cols
+                    ]
+                    x_part = np.column_stack(x_cols).astype(np.float32, copy=False)
+                    y_part = tbl_sel[target_col].to_numpy(zero_copy_only=False).reshape(-1)
+                except Exception:
+                    pdf = tbl_sel.to_pandas()
+                    x_part = pdf[feature_cols].to_numpy(dtype=np.float32, copy=False)
+                    y_part = pdf[target_col].to_numpy(copy=False)
+                feat_parts.append(x_part)
+                tgt_parts.append(y_part)
+
+            if not feat_parts:
+                raise ValueError("Failed to gather parquet test holdout rows.")
+            x_arr = np.vstack(feat_parts)
+            y_arr = np.concatenate(tgt_parts)
+            print(
+                f"Perturbation test holdout from parquet: "
+                f"{len(y_arr):,} rows ({100.0 * (1.0 - train_ratio):.1f}% of {total_rows:,})"
+            )
+            return x_arr, y_arr, feature_cols
+
+        raise ValueError(
+            "perturbation_analysis requires an in-memory test set "
+            "(self.__x_test / self.__y_test) or Model(single_parquet_path=...)."
+        )
+
     def get_model_structure(self):
         """
         Display and return the model's input/output structure information.
@@ -11207,10 +13288,1758 @@ class Model:
             else:
                 report = self.classification_report()
                 return report
-                
+
+    def _store_cv_train_config(self, method_name, **kwargs):
+        """Persist hyperparameters so cross_validation can retrain without a prior train() call."""
+        self._cv_train_config = {"method": method_name, **kwargs}
+
+    _MODEL_HP_DEFAULTS = {
+        "iterations": 2000,
+        "depth": 8,
+        "lr": 0.03,
+        "early_stopping_rounds": 100,
+        "early_stop_after_n_itiration": None,
+        "epochs": 50,
+    }
+
+    def _resolve_hyperparam(self, name, explicit=None, default=None):
+        """Method arg > Model constructor > built-in default."""
+        if explicit is not None:
+            return explicit
+        model_val = getattr(self, name, None)
+        if model_val is not None:
+            return model_val
+        if default is not None:
+            return default
+        return self._MODEL_HP_DEFAULTS.get(name)
+
+    def _resolve_train_hyperparams(self, **explicit):
+        return {
+            key: self._resolve_hyperparam(key, value, self._MODEL_HP_DEFAULTS.get(key))
+            for key, value in explicit.items()
+        }
+
+    def _get_cv_train_config(self, *, target_column_name=None, exclude_cols=None, **overrides):
+        stored = dict(getattr(self, "_cv_train_config", None) or {})
+        stored.pop("method", None)
+
+        if "target_column_name" in overrides:
+            target_column_name = overrides.pop("target_column_name")
+        if "target_col" in overrides and target_column_name is None:
+            target_column_name = overrides.pop("target_col")
+        elif "target_col" in overrides:
+            overrides.pop("target_col")
+
+        if "exclude_cols" in overrides:
+            exclude_cols = overrides.pop("exclude_cols")
+
+        resolved_target = (
+            target_column_name
+            or getattr(self, "target_column_name", None)
+            or stored.get("target_col")
+            or "y"
+        )
+        resolved_exclude = (
+            exclude_cols
+            if exclude_cols is not None
+            else getattr(self, "exclude_cols", None)
+            or stored.get("exclude_cols")
+            or getattr(self, "exclude_columns", None)
+        )
+
+        model_defaults = {
+            "xgboost": {
+                "iterations": self._resolve_hyperparam("iterations", default=2000),
+                "depth": self._resolve_hyperparam("depth", default=8),
+                "lr": self._resolve_hyperparam("lr", default=0.03),
+                "early_stop_after_n_itiration": self._resolve_hyperparam(
+                    "early_stop_after_n_itiration", default=None
+                ),
+            },
+            "xgb": {
+                "iterations": self._resolve_hyperparam("iterations", default=2000),
+                "depth": self._resolve_hyperparam("depth", default=8),
+                "lr": self._resolve_hyperparam("lr", default=0.03),
+                "early_stop_after_n_itiration": self._resolve_hyperparam(
+                    "early_stop_after_n_itiration", default=None
+                ),
+            },
+            "catboost": {
+                "iterations": self._resolve_hyperparam("iterations", default=2000),
+                "depth": self._resolve_hyperparam("depth", default=8),
+                "lr": self._resolve_hyperparam("lr", default=0.03),
+                "early_stopping_rounds": self._resolve_hyperparam(
+                    "early_stopping_rounds", default=100
+                ),
+                "loss_function": None,
+            },
+        }
+        mn = str(getattr(self, "model_name", "")).lower()
+        defaults = {
+            "target_col": resolved_target,
+            "exclude_cols": resolved_exclude,
+            "val_ratio": None,
+            "show_progress": True,
+            **model_defaults.get(mn, {}),
+        }
+        return {**defaults, **stored, **overrides}
+
+    def _build_cv_estimator(self, cfg, *, is_classification=False, n_classes=None):
+        """Create a fresh unfitted estimator for one CV fold."""
+        from sklearn.base import clone
+
+        mn = str(getattr(self, "model_name", "")).lower()
+        use_gpu = bool(getattr(self, "use_gpu", False))
+
+        if mn in ("xgboost", "xgb"):
+            import xgboost as xgb
+
+            xgb_version = getattr(xgb, "__version__", "1.7.0")
+
+            def _version_ge(v, major, minor=0):
+                try:
+                    parts = [int(p) for p in v.split(".")[:2]]
+                    return (parts[0], parts[1]) >= (major, minor)
+                except Exception:
+                    return False
+
+            params_common = dict(
+                n_estimators=int(cfg.get("iterations", 2000)),
+                max_depth=int(cfg.get("depth", 8)),
+                learning_rate=float(cfg.get("lr", 0.03)),
+                subsample=1.0,
+                colsample_bytree=1.0,
+                random_state=42,
+            )
+            if _version_ge(xgb_version, 2, 0):
+                params_common["tree_method"] = "hist"
+                params_common["device"] = "cuda" if use_gpu else "cpu"
+            else:
+                params_common["tree_method"] = "gpu_hist" if use_gpu else "hist"
+                if use_gpu:
+                    params_common["predictor"] = "gpu_predictor"
+
+            if is_classification:
+                if n_classes == 2:
+                    return xgb.XGBClassifier(
+                        objective="binary:logistic",
+                        eval_metric="logloss",
+                        **params_common,
+                    )
+                return xgb.XGBClassifier(
+                    objective="multi:softprob",
+                    num_class=n_classes,
+                    eval_metric="mlogloss",
+                    **params_common,
+                )
+            return xgb.XGBRegressor(
+                objective="reg:squarederror",
+                eval_metric="rmse",
+                **params_common,
+            )
+
+        if mn == "catboost":
+            from catboost import CatBoostClassifier, CatBoostRegressor
+
+            gpu_params = {}
+            if use_gpu:
+                try:
+                    import torch
+
+                    devices_str = None
+                    if bool(getattr(self, "all_gpu", False)) or str(getattr(self, "max_gpus", "")).lower() == "all":
+                        total = torch.cuda.device_count() if torch is not None else 0
+                        if total > 0:
+                            devices_str = ",".join(str(i) for i in range(total))
+                    if devices_str is None and getattr(self, "_used_gpu_ids", None):
+                        devices_str = ",".join(str(i) for i in self._used_gpu_ids)
+                    if devices_str is None:
+                        devices_str = "0"
+                    gpu_params["task_type"] = "GPU"
+                    gpu_params["devices"] = devices_str
+                except Exception:
+                    pass
+
+            common = dict(
+                iterations=int(cfg.get("iterations", 2000)),
+                depth=int(cfg.get("depth", 8)),
+                learning_rate=float(cfg.get("lr", 0.03)),
+                random_seed=42,
+                verbose=False,
+                **gpu_params,
+            )
+            if is_classification:
+                return CatBoostClassifier(
+                    loss_function=cfg.get("loss_function"),
+                    **common,
+                )
+            return CatBoostRegressor(
+                loss_function=cfg.get("loss_function") or "RMSE",
+                eval_metric="RMSE",
+                **common,
+            )
+
+        if self.__model is not None:
+            return clone(self.__model)
+
+        tmp = Model(
+            data_x=None,
+            data_y=None,
+            model_name=self.model_name,
+            task=self.__task,
+            use_gpu=use_gpu,
+            reading_mode="empty_model",
+        )
+        if tmp.__model is None:
+            raise ValueError(
+                f"cross_validation: unsupported model_name '{self.model_name}'. "
+                "Pass model hyperparameters via cross_validation(..., **kwargs)."
+            )
+        return clone(tmp.__model)
+
+    def _compute_cv_regression_metrics(self, y_true, y_pred):
+        import numpy as np
+        from math import sqrt
+        from sklearn.metrics import (
+            mean_absolute_error,
+            mean_squared_error,
+            median_absolute_error,
+            r2_score,
+        )
+
+        y_true = np.asarray(y_true).reshape(-1)
+        y_pred = np.asarray(y_pred).reshape(-1)
+        n = min(y_true.size, y_pred.size)
+        if n == 0:
+            return {"N": 0}
+        y_true, y_pred = y_true[:n], y_pred[:n]
+        mse_val = float(mean_squared_error(y_true, y_pred))
+        rmse_val = float(sqrt(mse_val))
+        mean_y = float(np.mean(y_true))
+        rng = float(np.max(y_true) - np.min(y_true))
+        return {
+            "N": n,
+            "R2": float(r2_score(y_true, y_pred)),
+            "R": float(np.corrcoef(y_true, y_pred)[0, 1])
+            if (np.std(y_true) > 0 and np.std(y_pred) > 0)
+            else float("nan"),
+            "MSE": mse_val,
+            "RMSE": rmse_val,
+            "MAE": float(mean_absolute_error(y_true, y_pred)),
+            "MEDAE": float(median_absolute_error(y_true, y_pred)),
+            "Bias": float(np.mean(y_pred - y_true)),
+            "NRMSE_mean": (rmse_val / mean_y) if mean_y != 0 else float("nan"),
+            "NRMSE_range": (rmse_val / rng) if rng > 0 else float("nan"),
+        }
+
+    def _compute_cv_classification_metrics(self, y_true, y_pred, model=None, x_data=None):
+        import numpy as np
+        from sklearn.metrics import (
+            accuracy_score,
+            f1_score,
+            precision_score,
+            recall_score,
+            roc_auc_score,
+        )
+
+        y_true = np.asarray(y_true).reshape(-1)
+        y_pred = np.asarray(y_pred).reshape(-1)
+        n = min(y_true.size, y_pred.size)
+        if n == 0:
+            return {"N": 0}
+        y_true, y_pred = y_true[:n], y_pred[:n]
+        metrics = {
+            "N": n,
+            "Accuracy": float(accuracy_score(y_true, y_pred)),
+            "Precision": float(
+                precision_score(y_true, y_pred, average="weighted", zero_division=0)
+            ),
+            "Recall": float(
+                recall_score(y_true, y_pred, average="weighted", zero_division=0)
+            ),
+            "F1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+        }
+        classes = np.unique(y_true)
+        if len(classes) == 2:
+            try:
+                if model is not None and hasattr(model, "predict_proba") and x_data is not None:
+                    proba = model.predict_proba(x_data)
+                    metrics["ROC_AUC"] = float(roc_auc_score(y_true, proba[:, 1]))
+            except Exception:
+                pass
+        return metrics
+
+    def _append_cv_mean_row(self, df):
+        import pandas as pd
+
+        if df is None or df.empty:
+            return df
+        fold_col = "Fold" if "Fold" in df.columns else ("Folds" if "Folds" in df.columns else None)
+        numeric_cols = [
+            c
+            for c in df.columns
+            if c not in ("Fold", "Folds", "N")
+            and pd.api.types.is_numeric_dtype(df[c])
+        ]
+        mean_row = {fold_col: "Mean"} if fold_col else {}
+        if "N" in df.columns:
+            mean_row["N"] = int(df["N"].sum())
+        for col in numeric_cols:
+            mean_row[col] = float(df[col].mean())
+        return pd.concat([df, pd.DataFrame([mean_row])], ignore_index=True)
+
+    def _cv_dataframe_to_pandas(self, df):
+        import pandas as pd
+
+        if isinstance(df, pd.DataFrame):
+            return df.copy()
+        if hasattr(df, "get_columns_names") and hasattr(df, "get_column"):
+            data = {}
+            for col in df.get_columns_names():
+                series = df.get_column(col)
+                data[col] = series.tolist() if hasattr(series, "tolist") else list(series)
+            return pd.DataFrame(data)
+        return pd.DataFrame(df)
+
+    def _write_cv_outputs(
+        self,
+        df,
+        *,
+        mode: str,
+        k: int,
+        fold_detail_blocks=None,
+        output_metrics_dir=None,
+        extra_config=None,
+    ):
+        """Persist CV metrics to ``output_metrics_dir`` as CSV + human-readable report."""
+        import os
+
+        pdf = self._cv_dataframe_to_pandas(df)
+        out = (
+            output_metrics_dir
+            or getattr(self, "output_metrics_dir", None)
+            or "./results_monitor"
+        )
+        os.makedirs(out, exist_ok=True)
+        csv_path = os.path.join(out, "cross_validation_metrics.csv")
+        pdf.to_csv(csv_path, index=False)
+
+        config = {
+            "k_folds": k,
+            "mode": mode,
+            "model_name": getattr(self, "model_name", None),
+            "task": getattr(self, "__task", None),
+            "single_parquet_path": getattr(self, "single_parquet_path", None),
+            "target_column_name": getattr(self, "target_column_name", None),
+            "exclude_cols": getattr(self, "exclude_cols", None),
+            "iterations": getattr(self, "iterations", None),
+            "depth": getattr(self, "depth", None),
+            "lr": getattr(self, "lr", None),
+        }
+        if extra_config:
+            config.update(extra_config)
+
+        sections = [
+            ("Config", config),
+            ("Per-fold metrics", pdf.to_string(index=False)),
+        ]
+        for title, body in fold_detail_blocks or []:
+            sections.append((title, body))
+
+        self._write_training_report(
+            out,
+            method_name="cross_validation",
+            sections=sections,
+            filename="cross_validation_report.txt",
+        )
+        print(f"✅ CV metrics CSV saved to {csv_path}")
+        return df
+
+    def _loader_prediction_metrics(self, model, loader, *, tabformer=False, device=None):
+        """Collect predictions from a loader and return a per-fold metrics dict."""
+        import numpy as np
+        import torch
+
+        preds, trues = [], []
+        got_any = False
+        inner_model = getattr(model, "_Model__model", None) or getattr(model, "__model", None)
+
+        if tabformer:
+            if inner_model is None:
+                return None
+            inner_model.eval()
+            with torch.no_grad():
+                for xb, yb in loader:
+                    got_any = True
+                    xb = xb.to(device, non_blocking=True)
+                    yb = yb.to(device, non_blocking=True)
+                    pb = inner_model(xb)
+                    preds.append(pb.detach().cpu().numpy().reshape(-1))
+                    trues.append(yb.detach().cpu().numpy().reshape(-1))
+        else:
+            if inner_model is None:
+                return None
+            for xb, yb in loader:
+                got_any = True
+                if hasattr(xb, "numpy"):
+                    xb = xb.numpy()
+                if hasattr(yb, "numpy"):
+                    yb = yb.numpy()
+                if len(yb.shape) > 1:
+                    yb = yb.reshape(-1)
+                pb = inner_model.predict(xb)
+                preds.append(np.asarray(pb).reshape(-1))
+                trues.append(np.asarray(yb).reshape(-1))
+
+        if not got_any:
+            return None
+
+        y_true = np.concatenate(trues, axis=0)
+        y_pred = np.concatenate(preds, axis=0)
+        is_classification = str(getattr(self, "__task", "r")).lower().startswith("c")
+        if is_classification:
+            return self._compute_cv_classification_metrics(
+                y_true, y_pred, model=inner_model, x_data=None
+            )
+        return self._compute_cv_regression_metrics(y_true, y_pred)
+
+    def _cross_validation_single_parquet_kfold(
+        self,
+        k: int,
+        *,
+        target_column_name: str | None = None,
+        exclude_cols: list[str] | None = None,
+        shuffle: bool = True,
+        random_state: int | None = 42,
+        output_metrics_dir: str | None = None,
+        **train_kwargs,
+    ):
+        """K-fold CV on ``self.single_parquet_path``; trains a fresh model per fold."""
+        import numpy as np
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from sklearn.metrics import (
+            accuracy_score,
+            f1_score,
+            mean_squared_error,
+            precision_score,
+            r2_score,
+            recall_score,
+            roc_auc_score,
+        )
+        from sklearn.model_selection import KFold, StratifiedKFold, train_test_split
+        from tqdm.auto import tqdm
+
+        if not getattr(self, "single_parquet_path", None):
+            raise ValueError(
+                "cross_validation requires Model(single_parquet_path=...) for parquet-based CV."
+            )
+
+        # sklearn requires random_state=None when shuffle=False
+        if not shuffle:
+            random_state = None
+
+        cfg = self._get_cv_train_config(
+            target_column_name=target_column_name,
+            exclude_cols=exclude_cols,
+            **train_kwargs,
+        )
+        target_col = cfg["target_col"]
+        resolved_exclude_cols = cfg.get("exclude_cols")
+        show_progress = bool(cfg.get("show_progress", True))
+        is_classification = str(getattr(self, "__task", "r")).lower().startswith("c")
+
+        pf = pq.ParquetFile(self.single_parquet_path, memory_map=True)
+        schema = pf.schema_arrow
+        names = list(schema.names)
+        if target_col not in names:
+            raise ValueError(f"Target column '{target_col}' not found in parquet.")
+
+        meta_drop = {"date", "year", "month"}
+        feature_cols = [c for c in names if c not in {target_col, *meta_drop}]
+        if resolved_exclude_cols:
+            feature_cols = [c for c in feature_cols if c not in resolved_exclude_cols]
+        self.feature_names_ = feature_cols
+
+        total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
+        if total_rows < k:
+            k = max(1, total_rows)
+        if k < 2:
+            raise ValueError("Not enough rows to perform cross-validation (need at least 2).")
+
+        rg_bounds = []
+        acc = 0
+        for rg in range(pf.num_row_groups):
+            n = pf.metadata.row_group(rg).num_rows
+            rg_bounds.append((acc, acc + n))
+            acc += n
+
+        def _gather_by_indices(indices: np.ndarray, desc: str):
+            if indices is None or indices.size == 0:
+                return None, None
+            indices_sorted = np.sort(indices)
+            feat_parts, tgt_parts = [], []
+            bar = tqdm(
+                range(pf.num_row_groups),
+                desc=desc,
+                leave=False,
+                disable=not show_progress,
+            )
+            for rg in bar:
+                start, end = rg_bounds[rg]
+                left = np.searchsorted(indices_sorted, start, side="left")
+                right = np.searchsorted(indices_sorted, end, side="left")
+                local = indices_sorted[left:right] - start
+                if local.size == 0:
+                    continue
+                tbl = pf.read_row_group(rg, columns=feature_cols + [target_col])
+                tbl_sel = tbl.take(pa.array(local, type=pa.int64()))
+                try:
+                    x_cols = [tbl_sel[c].to_numpy(zero_copy_only=False) for c in feature_cols]
+                    x_part = np.column_stack(x_cols).astype(np.float32, copy=False)
+                    y_part = tbl_sel[target_col].to_numpy(zero_copy_only=False).reshape(-1)
+                except Exception:
+                    pdf = tbl_sel.to_pandas()
+                    x_part = pdf[feature_cols].to_numpy(dtype=np.float32, copy=False)
+                    y_part = pdf[target_col].to_numpy(copy=False)
+                feat_parts.append(x_part)
+                tgt_parts.append(y_part)
+            if not feat_parts:
+                return None, None
+            return np.vstack(feat_parts), np.concatenate(tgt_parts)
+
+        def _gather_target_all():
+            parts = []
+            for rg in range(pf.num_row_groups):
+                parts.append(
+                    pf.read_row_group(rg, columns=[target_col])[target_col].to_numpy(zero_copy_only=False)
+                )
+            return np.concatenate(parts)
+
+        idx_all = np.arange(total_rows, dtype=np.int64)
+        if is_classification:
+            y_all = _gather_target_all()
+            splitter = StratifiedKFold(
+                n_splits=k,
+                shuffle=shuffle,
+                random_state=random_state,
+            )
+            splits = list(splitter.split(idx_all, y_all))
+        else:
+            splitter = KFold(n_splits=k, shuffle=shuffle, random_state=random_state)
+            splits = list(splitter.split(idx_all))
+
+        val_ratio = cfg.get("val_ratio")
+        use_val = val_ratio is not None and float(val_ratio) > 0
+        mn = str(getattr(self, "model_name", "")).lower()
+        output_metrics_dir = (
+            output_metrics_dir
+            or train_kwargs.pop("output_metrics_dir", None)
+            or getattr(self, "output_metrics_dir", None)
+            or "./results_monitor"
+        )
+
+        fold_rows = []
+        fold_detail_blocks = []
+
+        split_mode = "random" if shuffle else "sequential"
+        print(
+            f"Running {k}-fold cross-validation for {self.model_name} "
+            f"on single parquet ({total_rows:,} rows, {len(feature_cols)} features, "
+            f"split={split_mode})"
+        )
+
+        for fold_num, (train_idx, test_idx) in enumerate(
+            tqdm(splits, desc="CV Folds", disable=not show_progress),
+            start=1,
+        ):
+            if use_val and len(train_idx) > 1:
+                tr_idx, va_idx = train_test_split(
+                    train_idx,
+                    test_size=float(val_ratio),
+                    random_state=random_state,
+                    shuffle=True,
+                )
+            else:
+                tr_idx, va_idx = train_idx, np.array([], dtype=np.int64)
+
+            x_train, y_train = _gather_by_indices(tr_idx, f"Fold {fold_num} train")
+            x_val, y_val = (
+                _gather_by_indices(va_idx, f"Fold {fold_num} val")
+                if va_idx.size > 0
+                else (None, None)
+            )
+            x_test, y_test = _gather_by_indices(test_idx, f"Fold {fold_num} test")
+
+            if x_train is None or y_train is None or x_test is None or y_test is None:
+                continue
+
+            self._print_feature_vector_example(
+                x_train,
+                feature_names=feature_cols,
+                context="cross-validation",
+                once_key="cv_single_parquet",
+                y_data=y_train,
+                target_name=target_col,
+            )
+
+            n_classes = None
+            if is_classification:
+                y_train, classes = pd.factorize(y_train)
+                y_train = y_train.astype(np.int64, copy=False)
+                y_test = pd.Categorical(y_test, categories=classes).codes.astype(np.int64, copy=False)
+                if x_val is not None and y_val is not None:
+                    y_val = pd.Categorical(y_val, categories=classes).codes.astype(np.int64, copy=False)
+                n_classes = int(len(classes))
+            else:
+                y_train = y_train.astype(np.float32, copy=False)
+                y_test = y_test.astype(np.float32, copy=False)
+                if x_val is not None and y_val is not None:
+                    y_val = y_val.astype(np.float32, copy=False)
+
+            model = self._build_cv_estimator(
+                cfg,
+                is_classification=is_classification,
+                n_classes=n_classes,
+            )
+
+            if mn in ("xgboost", "xgb"):
+                fit_kwargs = {"verbose": False}
+                eval_set = [(x_train, y_train)]
+                if x_val is not None and y_val is not None and len(y_val) > 0:
+                    eval_set.append((x_val, y_val))
+                if eval_set:
+                    fit_kwargs["eval_set"] = eval_set
+                early_stop = cfg.get("early_stop_after_n_itiration")
+                if (
+                    early_stop is not None
+                    and int(early_stop) > 0
+                    and x_val is not None
+                    and y_val is not None
+                    and len(y_val) > 0
+                ):
+                    fit_kwargs["early_stopping_rounds"] = int(early_stop)
+                model.fit(x_train, y_train, **fit_kwargs)
+
+            elif mn == "catboost":
+                from catboost import Pool
+
+                train_pool = Pool(x_train, y_train)
+                eval_pool = (
+                    Pool(x_val, y_val)
+                    if x_val is not None and y_val is not None and len(y_val) > 0
+                    else None
+                )
+                fit_kwargs = {"verbose": False}
+                if eval_pool is not None:
+                    fit_kwargs["eval_set"] = eval_pool
+                    early_stop = cfg.get("early_stopping_rounds")
+                    if early_stop is not None and int(early_stop) > 0:
+                        fit_kwargs["early_stopping_rounds"] = int(early_stop)
+                model.fit(train_pool, **fit_kwargs)
+
+            else:
+                model.fit(x_train, y_train)
+
+            y_pred = model.predict(x_test)
+
+            if is_classification:
+                metrics = self._compute_cv_classification_metrics(
+                    y_test, y_pred, model=model, x_data=x_test
+                )
+                fold_rows.append({"Fold": fold_num, **metrics})
+            else:
+                metrics = self._compute_cv_regression_metrics(y_test, y_pred)
+                fold_rows.append({"Fold": fold_num, **metrics})
+
+            fold_detail_blocks.append(
+                (
+                    f"Fold {fold_num}",
+                    self._format_split_metrics(
+                        y_test,
+                        y_pred,
+                        "c" if is_classification else "r",
+                    ),
+                )
+            )
+
+        df = pd.DataFrame(fold_rows)
+        if not df.empty:
+            df = self._append_cv_mean_row(df)
+
+        self._write_cv_outputs(
+            df,
+            mode="single_parquet",
+            k=k,
+            fold_detail_blocks=fold_detail_blocks,
+            output_metrics_dir=output_metrics_dir,
+            extra_config={
+                "target_col": target_col,
+                "exclude_cols": resolved_exclude_cols,
+                "feature_cols": feature_cols,
+                "total_rows": total_rows,
+            },
+        )
+        return df
+
+    # ------------------------------------------------------------------
+    # Spatial cross-validation
+    # ------------------------------------------------------------------
+
+    def _project_lon_lat_to_meters(
+        self,
+        lon,
+        lat,
+        source_crs: str = "EPSG:4326",
+        *,
+        show_progress: bool = True,
+        chunk_size: int = 2_000_000,
+    ):
+        """Project lon/lat arrays to EPSG:3857 meters (always_xy)."""
+        import numpy as np
+        try:
+            from pyproj import Transformer
+        except ImportError as e:
+            raise ImportError(
+                "spatial_cross_validation requires pyproj. Install with: pip install pyproj"
+            ) from e
+        from tqdm.auto import tqdm
+
+        lon = np.asarray(lon, dtype=np.float64).reshape(-1)
+        lat = np.asarray(lat, dtype=np.float64).reshape(-1)
+        transformer = Transformer.from_crs(source_crs, "EPSG:3857", always_xy=True)
+        n = int(lon.size)
+        if n <= int(chunk_size):
+            x, y = transformer.transform(lon, lat)
+            return np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64)
+
+        x_out = np.empty(n, dtype=np.float64)
+        y_out = np.empty(n, dtype=np.float64)
+        for start in tqdm(
+            range(0, n, int(chunk_size)),
+            desc="Project CRS → EPSG:3857",
+            disable=not show_progress,
+            leave=False,
+        ):
+            end = min(start + int(chunk_size), n)
+            xx, yy = transformer.transform(lon[start:end], lat[start:end])
+            x_out[start:end] = xx
+            y_out[start:end] = yy
+        return x_out, y_out
+
+    def _inverse_meters_to_lon_lat(self, x, y, source_crs: str = "EPSG:4326"):
+        import numpy as np
+        from pyproj import Transformer
+
+        transformer = Transformer.from_crs("EPSG:3857", source_crs, always_xy=True)
+        lon, lat = transformer.transform(
+            np.asarray(x, dtype=np.float64),
+            np.asarray(y, dtype=np.float64),
+        )
+        return np.asarray(lon, dtype=np.float64), np.asarray(lat, dtype=np.float64)
+
+    def _assign_spatial_block_ids(
+        self,
+        lon,
+        lat,
+        *,
+        n_folds: int = 5,
+        block_size_meters: float | None = None,
+        source_crs: str = "EPSG:4326",
+        random_state: int = 42,
+        y=None,
+        kmeans_subsample: int = 500_000,
+        show_progress: bool = True,
+    ):
+        """
+        Assign a spatial block_id to every row.
+
+        Mode A (block_size_meters is None): k-means into exactly n_folds regions
+        covering the whole dataset.
+        Mode B (block_size_meters set): meter grid; randomly sample n_folds cells
+        of size block_size_meters x block_size_meters (one held-out block per fold).
+        """
+        import numpy as np
+        import pandas as pd
+        from tqdm.auto import tqdm
+
+        if n_folds < 2:
+            raise ValueError("n_folds must be >= 2")
+
+        lon = np.asarray(lon, dtype=np.float64).reshape(-1)
+        lat = np.asarray(lat, dtype=np.float64).reshape(-1)
+        if lon.size != lat.size:
+            raise ValueError("lon and lat must have the same length")
+        n = int(lon.size)
+        if n == 0:
+            raise ValueError("No coordinates provided for spatial_cross_validation")
+
+        x, y_m = self._project_lon_lat_to_meters(
+            lon, lat, source_crs=source_crs, show_progress=show_progress
+        )
+        y_arr = None if y is None else np.asarray(y).reshape(-1)
+
+        rng = np.random.default_rng(random_state)
+        projected_crs = "EPSG:3857"
+
+        if block_size_meters is None:
+            # Mode A: whole dataset -> n_folds spatial clusters
+            mode = "kmeans_n_folds"
+            from sklearn.cluster import MiniBatchKMeans
+
+            xy = np.column_stack([x, y_m])
+            if n > int(kmeans_subsample):
+                sample_idx = rng.choice(n, size=int(kmeans_subsample), replace=False)
+                fit_xy = xy[sample_idx]
+            else:
+                fit_xy = xy
+
+            with tqdm(total=2, desc="KMeans spatial blocks", disable=not show_progress, leave=False) as km_bar:
+                km_bar.set_postfix_str("fit")
+                km = MiniBatchKMeans(
+                    n_clusters=int(n_folds),
+                    random_state=int(random_state),
+                    batch_size=min(10000, max(1000, fit_xy.shape[0] // 10)),
+                    n_init=3,
+                )
+                km.fit(fit_xy)
+                km_bar.update(1)
+                km_bar.set_postfix_str("predict")
+                block_id = np.empty(n, dtype=np.int32)
+                pred_chunk = 2_000_000
+                for start in tqdm(
+                    range(0, n, pred_chunk),
+                    desc="KMeans predict",
+                    disable=not show_progress,
+                    leave=False,
+                ):
+                    end = min(start + pred_chunk, n)
+                    block_id[start:end] = km.predict(xy[start:end]).astype(np.int32, copy=False)
+                km_bar.update(1)
+            keep_mask = np.ones(n, dtype=bool)
+            # Each cluster is the held-out block for fold (block_id + 1)
+            block_to_fold = {int(b): int(b) + 1 for b in range(int(n_folds))}
+            n_blocks_total = int(n_folds)
+            n_blocks_used = int(n_folds)
+            grid_ix = grid_iy = None
+            size = None
+        else:
+            # Mode B: fixed meter grid + sample exactly n_folds blocks
+            mode = "meter_grid"
+            size = float(block_size_meters)
+            if size <= 0:
+                raise ValueError("block_size_meters must be > 0")
+
+            with tqdm(total=3, desc="Meter-grid blocks", disable=not show_progress, leave=False) as grid_bar:
+                grid_bar.set_postfix_str("assign cells")
+                grid_ix = np.floor(x / size).astype(np.int64)
+                grid_iy = np.floor(y_m / size).astype(np.int64)
+                cells = np.empty(n, dtype=[("ix", np.int64), ("iy", np.int64)])
+                cells["ix"] = grid_ix
+                cells["iy"] = grid_iy
+                unique_cells, inverse = np.unique(cells, return_inverse=True)
+                n_blocks_total = int(unique_cells.size)
+                grid_bar.update(1)
+
+                if n_blocks_total < n_folds:
+                    raise ValueError(
+                        f"Only {n_blocks_total} non-empty spatial blocks found; "
+                        f"need >= n_folds={n_folds}."
+                    )
+
+                grid_bar.set_postfix_str(f"sample {n_folds} blocks")
+                chosen = rng.choice(n_blocks_total, size=int(n_folds), replace=False)
+                chosen_sorted = np.sort(chosen.astype(np.int64))
+                # Remap chosen unique indices -> dense 0..n_folds-1
+                remap = np.full(n_blocks_total, -1, dtype=np.int32)
+                remap[chosen_sorted] = np.arange(int(n_folds), dtype=np.int32)
+                block_id = remap[inverse]
+                keep_mask = block_id >= 0
+                grid_bar.update(1)
+
+                grid_bar.set_postfix_str("assign folds")
+                n_blocks_used = int(n_folds)
+                # One sampled block per fold (leave-one-block-out)
+                block_to_fold = {int(b): int(b) + 1 for b in range(int(n_folds))}
+                grid_bar.update(1)
+
+        # Per-block stats / BBOX (over kept rows)
+        kept_ids = block_id[keep_mask]
+        unique_kept = np.unique(kept_ids)
+        total_kept = int(keep_mask.sum())
+        block_records = []
+
+        for b in tqdm(
+            unique_kept,
+            desc="Block BBOX / stats",
+            disable=not show_progress,
+            leave=False,
+        ):
+            b = int(b)
+            m = keep_mask & (block_id == b)
+            xs, ys = x[m], y_m[m]
+            lons, lats = lon[m], lat[m]
+            n_rows = int(m.sum())
+            xmin, xmax = float(xs.min()), float(xs.max())
+            ymin, ymax = float(ys.min()), float(ys.max())
+            lon_min, lon_max = float(lons.min()), float(lons.max())
+            lat_min, lat_max = float(lats.min()), float(lats.max())
+
+            if mode == "meter_grid" and size is not None and grid_ix is not None:
+                # Use full grid-cell corners for Mode B BBOX
+                ix = int(grid_ix[m][0])
+                iy = int(grid_iy[m][0])
+                xmin, xmax = ix * size, (ix + 1) * size
+                ymin, ymax = iy * size, (iy + 1) * size
+                lon_corners, lat_corners = self._inverse_meters_to_lon_lat(
+                    [xmin, xmax, xmin, xmax],
+                    [ymin, ymin, ymax, ymax],
+                    source_crs=source_crs,
+                )
+                lon_min, lon_max = float(np.min(lon_corners)), float(np.max(lon_corners))
+                lat_min, lat_max = float(np.min(lat_corners)), float(np.max(lat_corners))
+
+            width_m = max(0.0, xmax - xmin)
+            height_m = max(0.0, ymax - ymin)
+            area_km2 = (width_m * height_m) / 1e6 if (width_m > 0 and height_m > 0) else float("nan")
+            x_c, y_c = float(xs.mean()), float(ys.mean())
+            lon_c, lat_c = float(lons.mean()), float(lats.mean())
+            density = (n_rows / area_km2) if (area_km2 and area_km2 > 0) else float("nan")
+
+            rec = {
+                "block_id": b,
+                "fold": block_to_fold.get(b),
+                "n_rows": n_rows,
+                "pct_rows": (100.0 * n_rows / total_kept) if total_kept else 0.0,
+                "xmin": xmin,
+                "ymin": ymin,
+                "xmax": xmax,
+                "ymax": ymax,
+                "lon_min": lon_min,
+                "lat_min": lat_min,
+                "lon_max": lon_max,
+                "lat_max": lat_max,
+                "x_centroid": x_c,
+                "y_centroid": y_c,
+                "lon_centroid": lon_c,
+                "lat_centroid": lat_c,
+                "width_m": width_m,
+                "height_m": height_m,
+                "area_km2": area_km2,
+                "points_per_km2": density,
+            }
+            if y_arr is not None and y_arr.size == n:
+                yb = y_arr[m].astype(np.float64, copy=False)
+                rec["y_mean"] = float(np.mean(yb))
+                rec["y_std"] = float(np.std(yb))
+                rec["y_min"] = float(np.min(yb))
+                rec["y_max"] = float(np.max(yb))
+            block_records.append(rec)
+
+        blocks_df = pd.DataFrame(block_records).sort_values("block_id").reset_index(drop=True)
+
+        union = {
+            "xmin": float(blocks_df["xmin"].min()) if len(blocks_df) else None,
+            "ymin": float(blocks_df["ymin"].min()) if len(blocks_df) else None,
+            "xmax": float(blocks_df["xmax"].max()) if len(blocks_df) else None,
+            "ymax": float(blocks_df["ymax"].max()) if len(blocks_df) else None,
+            "lon_min": float(blocks_df["lon_min"].min()) if len(blocks_df) else None,
+            "lat_min": float(blocks_df["lat_min"].min()) if len(blocks_df) else None,
+            "lon_max": float(blocks_df["lon_max"].max()) if len(blocks_df) else None,
+            "lat_max": float(blocks_df["lat_max"].max()) if len(blocks_df) else None,
+        }
+
+        summary = {
+            "mode": mode,
+            "n_folds": int(n_folds),
+            "block_size_meters": block_size_meters,
+            "n_blocks_total": n_blocks_total,
+            "n_blocks_used": n_blocks_used,
+            "source_crs": source_crs,
+            "projected_crs": projected_crs,
+            "random_state": int(random_state),
+            "n_rows_total": n,
+            "n_rows_kept": total_kept,
+            "n_rows_discarded": int(n - total_kept),
+            "union_bbox": union,
+            "block_to_fold": block_to_fold,
+        }
+        return block_id, keep_mask, blocks_df, summary
+
+    def _min_centroid_dist_m(self, val_blocks_df, train_blocks_df):
+        import numpy as np
+        from tqdm.auto import tqdm
+
+        if val_blocks_df is None or train_blocks_df is None:
+            return float("nan"), float("nan")
+        if len(val_blocks_df) == 0 or len(train_blocks_df) == 0:
+            return float("nan"), float("nan")
+        vx = val_blocks_df["x_centroid"].to_numpy(dtype=np.float64)
+        vy = val_blocks_df["y_centroid"].to_numpy(dtype=np.float64)
+        tx = train_blocks_df["x_centroid"].to_numpy(dtype=np.float64)
+        ty = train_blocks_df["y_centroid"].to_numpy(dtype=np.float64)
+        mins = []
+        for i in tqdm(
+            range(len(vx)),
+            desc="Centroid distances",
+            disable=len(vx) < 50,
+            leave=False,
+        ):
+            d = np.sqrt((tx - vx[i]) ** 2 + (ty - vy[i]) ** 2)
+            mins.append(float(np.min(d)))
+        return float(np.min(mins)), float(np.mean(mins))
+
+    def _write_spatial_cv_outputs(
+        self,
+        metrics_df,
+        blocks_df,
+        fold_summary_df,
+        *,
+        n_folds: int,
+        output_metrics_dir: str,
+        summary: dict,
+        fold_detail_blocks=None,
+        extra_config=None,
+        total_time_sec=None,
+        show_progress: bool = True,
+    ):
+        import os
+        import numpy as np
+        import pandas as pd
+        from tqdm.auto import tqdm
+
+        out = output_metrics_dir or getattr(self, "output_metrics_dir", None) or "./results_monitor"
+        os.makedirs(out, exist_ok=True)
+
+        metrics_path = os.path.join(out, "spatial_cross_validation_metrics.csv")
+        blocks_path = os.path.join(out, "spatial_cross_validation_blocks.csv")
+        fold_path = os.path.join(out, "spatial_cross_validation_fold_summary.csv")
+
+        with tqdm(total=4, desc="Write spatial CV reports", disable=not show_progress, leave=False) as wbar:
+            wbar.set_postfix_str("metrics.csv")
+            metrics_pdf = self._cv_dataframe_to_pandas(metrics_df)
+            metrics_pdf.to_csv(metrics_path, index=False)
+            wbar.update(1)
+
+            wbar.set_postfix_str("blocks.csv")
+            blocks_pdf = self._cv_dataframe_to_pandas(blocks_df)
+            blocks_pdf.to_csv(blocks_path, index=False)
+            wbar.update(1)
+
+            wbar.set_postfix_str("fold_summary.csv")
+            fold_pdf = self._cv_dataframe_to_pandas(fold_summary_df)
+            fold_pdf.to_csv(fold_path, index=False)
+            wbar.update(1)
+
+            wbar.set_postfix_str("report.txt")
+            union = summary.get("union_bbox") or {}
+            config = {
+                "mode": summary.get("mode"),
+                "n_folds": n_folds,
+                "block_size_meters": summary.get("block_size_meters"),
+                "n_blocks_total": summary.get("n_blocks_total"),
+                "n_blocks_used": summary.get("n_blocks_used"),
+                "source_crs": summary.get("source_crs"),
+                "projected_crs": summary.get("projected_crs"),
+                "random_state": summary.get("random_state"),
+                "n_rows_total": summary.get("n_rows_total"),
+                "n_rows_kept": summary.get("n_rows_kept"),
+                "n_rows_discarded": summary.get("n_rows_discarded"),
+                "model_name": getattr(self, "model_name", None),
+                "task": getattr(self, "__task", None),
+                "iterations": getattr(self, "iterations", None),
+                "depth": getattr(self, "depth", None),
+                "lr": getattr(self, "lr", None),
+                "union_bbox_projected": {
+                    "xmin": union.get("xmin"),
+                    "ymin": union.get("ymin"),
+                    "xmax": union.get("xmax"),
+                    "ymax": union.get("ymax"),
+                },
+                "union_bbox_lonlat": {
+                    "lon_min": union.get("lon_min"),
+                    "lat_min": union.get("lat_min"),
+                    "lon_max": union.get("lon_max"),
+                    "lat_max": union.get("lat_max"),
+                },
+                "total_time_sec": total_time_sec,
+            }
+            if extra_config:
+                config.update(extra_config)
+
+            # Fold-size balance + metric variability
+            balance_text = ""
+            if not fold_pdf.empty and "n_val" in fold_pdf.columns:
+                nv = fold_pdf["n_val"].astype(float)
+                mean_nv = float(nv.mean())
+                std_nv = float(nv.std()) if len(nv) > 1 else 0.0
+                cv_nv = (std_nv / mean_nv) if mean_nv else float("nan")
+                balance_text = (
+                    f"n_val min={float(nv.min())} max={float(nv.max())} "
+                    f"mean={mean_nv} cv={cv_nv}\n"
+                )
+            metric_var_text = ""
+            for col in ("R2", "RMSE", "Accuracy", "F1"):
+                if col in metrics_pdf.columns:
+                    series = metrics_pdf.loc[metrics_pdf["Fold"].astype(str) != "Mean", col]
+                    if len(series):
+                        metric_var_text += f"{col}_std={float(series.std())}\n"
+
+            sections = [
+                ("Config", config),
+                ("Per-fold metrics", metrics_pdf.to_string(index=False)),
+                ("Fold-size balance", balance_text or "(n/a)"),
+                ("Metric variability across folds", metric_var_text or "(n/a)"),
+                ("Used blocks / BBOX", blocks_pdf.to_string(index=False)),
+                ("Overall union BBOX", str(union)),
+                ("Fold summary (balance / separation / target shift)", fold_pdf.to_string(index=False)),
+            ]
+            for title, body in fold_detail_blocks or []:
+                sections.append((title, body))
+
+            self._write_training_report(
+                out,
+                method_name="spatial_cross_validation",
+                sections=sections,
+                filename="spatial_cross_validation_report.txt",
+            )
+            wbar.update(1)
+
+        print(f"✅ Spatial CV metrics CSV saved to {metrics_path}")
+        print(f"✅ Spatial CV blocks CSV saved to {blocks_path}")
+        print(f"✅ Spatial CV fold summary CSV saved to {fold_path}")
+        return metrics_pdf
+
+    def _fit_spatial_cv_fold_estimator(
+        self,
+        cfg,
+        *,
+        x_train,
+        y_train,
+        x_val=None,
+        y_val=None,
+        is_classification=False,
+        n_classes=None,
+    ):
+        mn = str(getattr(self, "model_name", "")).lower()
+        model = self._build_cv_estimator(
+            cfg,
+            is_classification=is_classification,
+            n_classes=n_classes,
+        )
+        if mn in ("xgboost", "xgb"):
+            fit_kwargs = {"verbose": False}
+            eval_set = [(x_train, y_train)]
+            if x_val is not None and y_val is not None and len(y_val) > 0:
+                eval_set.append((x_val, y_val))
+            if eval_set:
+                fit_kwargs["eval_set"] = eval_set
+            early_stop = cfg.get("early_stop_after_n_itiration")
+            if (
+                early_stop is not None
+                and int(early_stop) > 0
+                and x_val is not None
+                and y_val is not None
+                and len(y_val) > 0
+            ):
+                fit_kwargs["early_stopping_rounds"] = int(early_stop)
+            model.fit(x_train, y_train, **fit_kwargs)
+        elif mn == "catboost":
+            from catboost import Pool
+
+            train_pool = Pool(x_train, y_train)
+            fit_kwargs = {"verbose": False}
+            if x_val is not None and y_val is not None and len(y_val) > 0:
+                fit_kwargs["eval_set"] = Pool(x_val, y_val)
+                early_stop = cfg.get("early_stopping_rounds")
+                if early_stop is not None and int(early_stop) > 0:
+                    fit_kwargs["early_stopping_rounds"] = int(early_stop)
+            model.fit(train_pool, **fit_kwargs)
+        else:
+            model.fit(x_train, y_train)
+        return model
+
+    def _spatial_cross_validation_single_parquet(
+        self,
+        n_folds: int = 5,
+        *,
+        lon_column_name: str,
+        lat_column_name: str,
+        block_size_meters: float | None = None,
+        source_crs: str = "EPSG:4326",
+        target_column_name: str | None = None,
+        exclude_cols: list[str] | None = None,
+        output_metrics_dir: str | None = None,
+        random_state: int = 42,
+        show_progress: bool = True,
+        **train_kwargs,
+    ):
+        """Spatial K-fold CV on ``self.single_parquet_path`` (true geographic blocks)."""
+        import time as _time
+        import numpy as np
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from tqdm.auto import tqdm
+
+        _t0 = _time.time()
+        if not getattr(self, "single_parquet_path", None):
+            raise ValueError("single_parquet_path not set.")
+
+        cfg = self._get_cv_train_config(
+            target_column_name=target_column_name,
+            exclude_cols=exclude_cols,
+            **train_kwargs,
+        )
+        target_col = cfg["target_col"]
+        resolved_exclude = cfg.get("exclude_cols")
+        # Keep explicit method arg (do not let cfg default force True)
+        show_progress = bool(show_progress)
+        is_classification = str(getattr(self, "__task", "r")).lower().startswith("c")
+        out_dir = (
+            output_metrics_dir
+            or getattr(self, "output_metrics_dir", None)
+            or "./results_monitor"
+        )
+
+        pf = pq.ParquetFile(self.single_parquet_path, memory_map=True)
+        names = list(pf.schema_arrow.names)
+        for col in (lon_column_name, lat_column_name, target_col):
+            if col not in names:
+                raise ValueError(f"Column '{col}' not found in parquet.")
+
+        meta_drop = {"date", "year", "month"}
+        feature_cols = [c for c in names if c not in {target_col, *meta_drop}]
+        if resolved_exclude:
+            feature_cols = [c for c in feature_cols if c not in resolved_exclude]
+        self.feature_names_ = feature_cols
+
+        total_rows = sum(pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups))
+        print(
+            f"Running spatial {n_folds}-fold CV for {self.model_name} "
+            f"on single parquet ({total_rows:,} rows)"
+        )
+
+        # Pass 1: load lon/lat/y for block assignment
+        lon_parts, lat_parts, y_parts = [], [], []
+        rg_iter = tqdm(
+            range(pf.num_row_groups),
+            desc="Load coords",
+            leave=False,
+            disable=not show_progress,
+        )
+        for rg in rg_iter:
+            tbl = pf.read_row_group(rg, columns=[lon_column_name, lat_column_name, target_col])
+            lon_parts.append(tbl[lon_column_name].to_numpy(zero_copy_only=False))
+            lat_parts.append(tbl[lat_column_name].to_numpy(zero_copy_only=False))
+            y_parts.append(tbl[target_col].to_numpy(zero_copy_only=False))
+        lon_all = np.concatenate(lon_parts)
+        lat_all = np.concatenate(lat_parts)
+        y_all = np.concatenate(y_parts)
+        del lon_parts, lat_parts, y_parts
+
+        block_id, keep_mask, blocks_df, summary = self._assign_spatial_block_ids(
+            lon_all,
+            lat_all,
+            n_folds=n_folds,
+            block_size_meters=block_size_meters,
+            source_crs=source_crs,
+            random_state=random_state,
+            y=y_all,
+            show_progress=show_progress,
+        )
+
+        block_to_fold = summary["block_to_fold"]
+        fold_of_row = np.full(total_rows, -1, dtype=np.int32)
+        for b, f in tqdm(
+            block_to_fold.items(),
+            desc="Map block→fold",
+            leave=False,
+            disable=not show_progress,
+        ):
+            fold_of_row[(block_id == b) & keep_mask] = int(f)
+
+        # Precompute RG bounds for gathering
+        rg_bounds = []
+        acc = 0
+        for rg in range(pf.num_row_groups):
+            n = pf.metadata.row_group(rg).num_rows
+            rg_bounds.append((acc, acc + n))
+            acc += n
+
+        def _gather_by_indices(indices: np.ndarray, desc: str):
+            if indices is None or indices.size == 0:
+                return None, None
+            indices_sorted = np.sort(indices)
+            feat_parts, tgt_parts = [], []
+            bar = tqdm(
+                range(pf.num_row_groups),
+                desc=desc,
+                leave=False,
+                disable=not show_progress,
+            )
+            for rg in bar:
+                start, end = rg_bounds[rg]
+                left = np.searchsorted(indices_sorted, start, side="left")
+                right = np.searchsorted(indices_sorted, end, side="left")
+                local = indices_sorted[left:right] - start
+                if local.size == 0:
+                    continue
+                tbl = pf.read_row_group(rg, columns=feature_cols + [target_col])
+                tbl_sel = tbl.take(pa.array(local, type=pa.int64()))
+                try:
+                    x_cols = [tbl_sel[c].to_numpy(zero_copy_only=False) for c in feature_cols]
+                    x_part = np.column_stack(x_cols).astype(np.float32, copy=False)
+                    y_part = tbl_sel[target_col].to_numpy(zero_copy_only=False).reshape(-1)
+                except Exception:
+                    pdf = tbl_sel.to_pandas()
+                    x_part = pdf[feature_cols].to_numpy(dtype=np.float32, copy=False)
+                    y_part = pdf[target_col].to_numpy(copy=False)
+                feat_parts.append(x_part)
+                tgt_parts.append(y_part)
+            if not feat_parts:
+                return None, None
+            return np.vstack(feat_parts), np.concatenate(tgt_parts)
+
+        fold_rows = []
+        fold_summaries = []
+        fold_detail_blocks = []
+        mn = str(getattr(self, "model_name", "")).lower()
+
+        fold_bar = tqdm(
+            range(1, n_folds + 1),
+            total=n_folds,
+            desc="Spatial CV",
+            disable=not show_progress,
+            unit="fold",
+        )
+        for fold_num in fold_bar:
+            fold_bar.set_postfix_str(f"fold {fold_num}: split")
+            val_mask = keep_mask & (fold_of_row == fold_num)
+            train_mask = keep_mask & (fold_of_row != fold_num) & (fold_of_row > 0)
+            train_idx = np.flatnonzero(train_mask)
+            test_idx = np.flatnonzero(val_mask)
+
+            # Leakage check
+            train_blocks = set(int(b) for b in np.unique(block_id[train_mask]))
+            val_blocks = set(int(b) for b in np.unique(block_id[val_mask]))
+            overlap = train_blocks & val_blocks
+            if overlap:
+                raise RuntimeError(
+                    f"Spatial leakage detected in fold {fold_num}: shared blocks {overlap}"
+                )
+
+            fold_bar.set_postfix_str(f"fold {fold_num}: load train")
+            x_train, y_train = _gather_by_indices(train_idx, f"Fold {fold_num} train")
+            fold_bar.set_postfix_str(f"fold {fold_num}: load test")
+            x_test, y_test = _gather_by_indices(test_idx, f"Fold {fold_num} test")
+            if x_train is None or y_train is None or x_test is None or y_test is None:
+                continue
+
+            self._print_feature_vector_example(
+                x_train,
+                feature_names=feature_cols,
+                context="spatial_cross_validation",
+                once_key="spatial_cv_single_parquet",
+                y_data=y_train,
+                target_name=target_col,
+            )
+
+            n_classes = None
+            y_train_mean = float(np.mean(y_train.astype(np.float64)))
+            y_val_mean = float(np.mean(y_test.astype(np.float64)))
+            if is_classification:
+                y_train, classes = pd.factorize(y_train)
+                y_train = y_train.astype(np.int64, copy=False)
+                y_test = pd.Categorical(y_test, categories=classes).codes.astype(np.int64, copy=False)
+                n_classes = int(len(classes))
+            else:
+                y_train = y_train.astype(np.float32, copy=False)
+                y_test = y_test.astype(np.float32, copy=False)
+
+            fold_bar.set_postfix_str(f"fold {fold_num}: train")
+            _fold_t0 = _time.time()
+            model = self._fit_spatial_cv_fold_estimator(
+                cfg,
+                x_train=x_train,
+                y_train=y_train,
+                is_classification=is_classification,
+                n_classes=n_classes,
+            )
+            fold_train_sec = _time.time() - _fold_t0
+            fold_bar.set_postfix_str(f"fold {fold_num}: predict")
+            y_pred = model.predict(x_test)
+
+            if is_classification:
+                metrics = self._compute_cv_classification_metrics(
+                    y_test, y_pred, model=model, x_data=x_test
+                )
+            else:
+                metrics = self._compute_cv_regression_metrics(y_test, y_pred)
+            fold_rows.append({"Fold": fold_num, **metrics})
+
+            val_bdf = blocks_df[blocks_df["fold"] == fold_num]
+            train_bdf = blocks_df[blocks_df["fold"] != fold_num]
+            min_dist, mean_min_dist = self._min_centroid_dist_m(val_bdf, train_bdf)
+
+            fold_summaries.append(
+                {
+                    "Fold": fold_num,
+                    "n_train": int(len(train_idx)),
+                    "n_val": int(len(test_idx)),
+                    "n_train_blocks": int(len(train_blocks)),
+                    "n_val_blocks": int(len(val_blocks)),
+                    "val_pct": 100.0 * len(test_idx) / max(1, len(train_idx) + len(test_idx)),
+                    "y_train_mean": y_train_mean,
+                    "y_val_mean": y_val_mean,
+                    "y_mean_diff": y_val_mean - y_train_mean,
+                    "min_centroid_dist_m": min_dist,
+                    "mean_min_centroid_dist_m": mean_min_dist,
+                    "train_time_sec": round(fold_train_sec, 4),
+                    "val_lon_min": float(val_bdf["lon_min"].min()) if len(val_bdf) else None,
+                    "val_lat_min": float(val_bdf["lat_min"].min()) if len(val_bdf) else None,
+                    "val_lon_max": float(val_bdf["lon_max"].max()) if len(val_bdf) else None,
+                    "val_lat_max": float(val_bdf["lat_max"].max()) if len(val_bdf) else None,
+                    **{k: metrics[k] for k in metrics if k != "N"},
+                }
+            )
+            fold_detail_blocks.append(
+                (
+                    f"Fold {fold_num}",
+                    self._format_split_metrics(
+                        y_test, y_pred, "c" if is_classification else "r"
+                    )
+                    + f"train_blocks={sorted(train_blocks)}\n"
+                    + f"val_blocks={sorted(val_blocks)}\n"
+                    + f"min_centroid_dist_m={min_dist}\n",
+                )
+            )
+
+        metrics_df = pd.DataFrame(fold_rows)
+        if not metrics_df.empty:
+            metrics_df = self._append_cv_mean_row(metrics_df)
+        fold_summary_df = pd.DataFrame(fold_summaries)
+
+        total_time = _time.time() - _t0
+        self._write_spatial_cv_outputs(
+            metrics_df,
+            blocks_df,
+            fold_summary_df,
+            n_folds=n_folds,
+            output_metrics_dir=out_dir,
+            summary=summary,
+            fold_detail_blocks=fold_detail_blocks,
+            extra_config={
+                "lon_column_name": lon_column_name,
+                "lat_column_name": lat_column_name,
+                "target_col": target_col,
+                "exclude_cols": resolved_exclude,
+                "feature_cols": feature_cols,
+                "parquet": self.single_parquet_path,
+            },
+            total_time_sec=round(total_time, 4),
+            show_progress=show_progress,
+        )
+        return metrics_df
+
+    def _spatial_cross_validation_in_memory(
+        self,
+        n_folds: int = 5,
+        *,
+        lon_column_name: str,
+        lat_column_name: str,
+        block_size_meters: float | None = None,
+        source_crs: str = "EPSG:4326",
+        target_column_name: str | None = None,
+        exclude_cols: list[str] | None = None,
+        output_metrics_dir: str | None = None,
+        random_state: int = 42,
+        show_progress: bool = True,
+        **train_kwargs,
+    ):
+        """Spatial K-fold CV on in-memory ``self.x`` / ``self.y``."""
+        import time as _time
+        import numpy as np
+        import pandas as pd
+        from tqdm.auto import tqdm
+
+        _t0 = _time.time()
+        if getattr(self, "x", None) is None or getattr(self, "y", None) is None:
+            raise ValueError("In-memory spatial_cross_validation requires self.x and self.y.")
+
+        cfg = self._get_cv_train_config(
+            target_column_name=target_column_name,
+            exclude_cols=exclude_cols,
+            **train_kwargs,
+        )
+        target_col = cfg["target_col"]
+        resolved_exclude = cfg.get("exclude_cols")
+        is_classification = str(getattr(self, "__task", "r")).lower().startswith("c")
+        out_dir = (
+            output_metrics_dir
+            or getattr(self, "output_metrics_dir", None)
+            or "./results_monitor"
+        )
+
+        X = self.x
+        y = np.asarray(self.y).reshape(-1)
+
+        if hasattr(X, "columns"):
+            if lon_column_name not in X.columns or lat_column_name not in X.columns:
+                raise ValueError(
+                    f"lon/lat columns '{lon_column_name}', '{lat_column_name}' "
+                    "not found in self.x DataFrame."
+                )
+            lon = X[lon_column_name].to_numpy(dtype=np.float64, copy=False)
+            lat = X[lat_column_name].to_numpy(dtype=np.float64, copy=False)
+            feature_cols = [c for c in list(X.columns) if c != target_col]
+            if resolved_exclude:
+                feature_cols = [c for c in feature_cols if c not in resolved_exclude]
+            # drop lon/lat from features only if excluded
+            X_feat = X[feature_cols].to_numpy(dtype=np.float32, copy=False)
+        else:
+            raise ValueError(
+                "In-memory spatial_cross_validation requires self.x as a DataFrame "
+                "with named lon/lat columns."
+            )
+
+        self.feature_names_ = feature_cols
+        print(f"Running spatial {n_folds}-fold CV for {self.model_name} (in-memory)")
+        block_id, keep_mask, blocks_df, summary = self._assign_spatial_block_ids(
+            lon,
+            lat,
+            n_folds=n_folds,
+            block_size_meters=block_size_meters,
+            source_crs=source_crs,
+            random_state=random_state,
+            y=y,
+            show_progress=show_progress,
+        )
+
+        block_to_fold = summary["block_to_fold"]
+        fold_of_row = np.full(len(y), -1, dtype=np.int32)
+        for b, f in tqdm(
+            block_to_fold.items(),
+            desc="Map block→fold",
+            leave=False,
+            disable=not show_progress,
+        ):
+            fold_of_row[(block_id == b) & keep_mask] = int(f)
+
+        fold_rows, fold_summaries, fold_detail_blocks = [], [], []
+        fold_bar = tqdm(
+            range(1, n_folds + 1),
+            total=n_folds,
+            desc="Spatial CV",
+            disable=not show_progress,
+            unit="fold",
+        )
+        for fold_num in fold_bar:
+            fold_bar.set_postfix_str(f"fold {fold_num}: split")
+            val_mask = keep_mask & (fold_of_row == fold_num)
+            train_mask = keep_mask & (fold_of_row != fold_num) & (fold_of_row > 0)
+            train_blocks = set(int(b) for b in np.unique(block_id[train_mask]))
+            val_blocks = set(int(b) for b in np.unique(block_id[val_mask]))
+            if train_blocks & val_blocks:
+                raise RuntimeError(f"Spatial leakage in fold {fold_num}")
+
+            x_train, y_train = X_feat[train_mask], y[train_mask]
+            x_test, y_test = X_feat[val_mask], y[val_mask]
+            if x_train.size == 0 or x_test.size == 0:
+                continue
+
+            self._print_feature_vector_example(
+                x_train,
+                feature_names=feature_cols,
+                context="spatial_cross_validation",
+                once_key="spatial_cv_in_memory",
+                y_data=y_train,
+                target_name=target_col,
+            )
+
+            y_train_mean = float(np.mean(y_train.astype(np.float64)))
+            y_val_mean = float(np.mean(y_test.astype(np.float64)))
+            n_classes = None
+            if is_classification:
+                y_train_enc, classes = pd.factorize(y_train)
+                y_train = y_train_enc.astype(np.int64)
+                y_test = pd.Categorical(y_test, categories=classes).codes.astype(np.int64)
+                n_classes = int(len(classes))
+            else:
+                y_train = y_train.astype(np.float32)
+                y_test = y_test.astype(np.float32)
+
+            fold_bar.set_postfix_str(f"fold {fold_num}: train")
+            _fold_t0 = _time.time()
+            model = self._fit_spatial_cv_fold_estimator(
+                cfg,
+                x_train=x_train,
+                y_train=y_train,
+                is_classification=is_classification,
+                n_classes=n_classes,
+            )
+            fold_train_sec = _time.time() - _fold_t0
+            fold_bar.set_postfix_str(f"fold {fold_num}: predict")
+            y_pred = model.predict(x_test)
+            if is_classification:
+                metrics = self._compute_cv_classification_metrics(
+                    y_test, y_pred, model=model, x_data=x_test
+                )
+            else:
+                metrics = self._compute_cv_regression_metrics(y_test, y_pred)
+            fold_rows.append({"Fold": fold_num, **metrics})
+
+            val_bdf = blocks_df[blocks_df["fold"] == fold_num]
+            train_bdf = blocks_df[blocks_df["fold"] != fold_num]
+            min_dist, mean_min_dist = self._min_centroid_dist_m(val_bdf, train_bdf)
+            fold_summaries.append(
+                {
+                    "Fold": fold_num,
+                    "n_train": int(train_mask.sum()),
+                    "n_val": int(val_mask.sum()),
+                    "n_train_blocks": int(len(train_blocks)),
+                    "n_val_blocks": int(len(val_blocks)),
+                    "val_pct": 100.0 * val_mask.sum() / max(1, keep_mask.sum()),
+                    "y_train_mean": y_train_mean,
+                    "y_val_mean": y_val_mean,
+                    "y_mean_diff": y_val_mean - y_train_mean,
+                    "min_centroid_dist_m": min_dist,
+                    "mean_min_centroid_dist_m": mean_min_dist,
+                    "train_time_sec": round(fold_train_sec, 4),
+                    **{k: metrics[k] for k in metrics if k != "N"},
+                }
+            )
+            fold_detail_blocks.append(
+                (
+                    f"Fold {fold_num}",
+                    self._format_split_metrics(
+                        y_test, y_pred, "c" if is_classification else "r"
+                    ),
+                )
+            )
+
+        metrics_df = pd.DataFrame(fold_rows)
+        if not metrics_df.empty:
+            metrics_df = self._append_cv_mean_row(metrics_df)
+        fold_summary_df = pd.DataFrame(fold_summaries)
+        self._write_spatial_cv_outputs(
+            metrics_df,
+            blocks_df,
+            fold_summary_df,
+            n_folds=n_folds,
+            output_metrics_dir=out_dir,
+            summary=summary,
+            fold_detail_blocks=fold_detail_blocks,
+            extra_config={
+                "lon_column_name": lon_column_name,
+                "lat_column_name": lat_column_name,
+                "target_col": target_col,
+                "exclude_cols": resolved_exclude,
+                "feature_cols": feature_cols,
+            },
+            total_time_sec=round(_time.time() - _t0, 4),
+            show_progress=show_progress,
+        )
+        return metrics_df
+
+    def spatial_cross_validation(
+        self,
+        n_folds: int = 5,
+        *,
+        lon_column_name: str,
+        lat_column_name: str,
+        block_size_meters: float | None = None,
+        source_crs: str = "EPSG:4326",
+        target_column_name: str | None = None,
+        exclude_cols: list[str] | None = None,
+        output_metrics_dir: str | None = None,
+        random_state: int = 42,
+        show_progress: bool = True,
+        **train_kwargs,
+    ):
+        """
+        Geographically independent K-fold cross-validation.
+
+        All observations in the same spatial block stay in the same fold so
+        training and validation never share a block (no spatial leakage).
+
+        Modes
+        -----
+        Mode A (``block_size_meters is None``):
+            Partition the whole dataset into exactly ``n_folds`` spatial
+            regions via MiniBatchKMeans on projected coordinates.
+        Mode B (``block_size_meters`` set):
+            Build a meter grid of that cell size and randomly sample
+            ``n_folds`` non-empty cells of size
+            ``block_size_meters x block_size_meters`` (one held-out block per fold).
+
+        Writes under ``output_metrics_dir``:
+          - spatial_cross_validation_metrics.csv
+          - spatial_cross_validation_blocks.csv
+          - spatial_cross_validation_fold_summary.csv
+          - spatial_cross_validation_report.txt
+        """
+        self._print_training_device(context="spatial_cross_validation")
+        if n_folds < 2:
+            raise ValueError("n_folds must be >= 2")
+        if not lon_column_name or not lat_column_name:
+            raise ValueError("lon_column_name and lat_column_name are required.")
+
+        out_dir = (
+            output_metrics_dir
+            or getattr(self, "output_metrics_dir", None)
+            or "./results_monitor"
+        )
+
+        if getattr(self, "single_parquet_path", None):
+            if self.model_name not in [
+                "catboost",
+                "xgboost",
+                "xgb",
+                "random_forest",
+                "decision_tree",
+                "gradient_boosting",
+                "linear_regression",
+                "svm",
+                "adaboost",
+            ]:
+                raise ValueError(
+                    f"spatial_cross_validation with single_parquet_path does not "
+                    f"support model_name='{self.model_name}'."
+                )
+            return self._spatial_cross_validation_single_parquet(
+                n_folds,
+                lon_column_name=lon_column_name,
+                lat_column_name=lat_column_name,
+                block_size_meters=block_size_meters,
+                source_crs=source_crs,
+                target_column_name=target_column_name,
+                exclude_cols=exclude_cols,
+                output_metrics_dir=out_dir,
+                random_state=random_state,
+                show_progress=show_progress,
+                **train_kwargs,
+            )
+
+        return self._spatial_cross_validation_in_memory(
+            n_folds,
+            lon_column_name=lon_column_name,
+            lat_column_name=lat_column_name,
+            block_size_meters=block_size_meters,
+            source_crs=source_crs,
+            target_column_name=target_column_name,
+            exclude_cols=exclude_cols,
+            output_metrics_dir=out_dir,
+            random_state=random_state,
+            show_progress=show_progress,
+            **train_kwargs,
+        )
+
     def cross_validation(
             self,
             k: int = 5,
+            sequential_split: bool = False,
             metric: str = 'r2',
             parquet_root: str | None = None,   # optional override; if None, use self.parquet_path if you store it
             feature_names: list[str] | None = None,
@@ -11218,14 +15047,31 @@ class Model:
             batch_size: int = 65536,
             epochs: int | None = None,
             lr: float = 1e-3,
+            target_column_name: str | None = None,
+            exclude_cols: list[str] | None = None,
+            output_metrics_dir: str | None = None,
+            **train_kwargs,
         ):
             """
             Chunking-aware K-fold CV.
-            - Streaming (chunked): month-based folds; trains via train_streaming per fold and evaluates on the held-out months.
-            - In-memory: uses classic KFold on self.x / self.y.
-    
-            Returns: pandas.DataFrame with columns: Fold, R2, RMSE and a 'Mean' row.
+            - Single parquet (``Model.single_parquet_path``): row-based K-fold; trains a fresh model per fold.
+              Requires ``target_column_name`` and optional ``exclude_cols`` (on Model or this call).
+            - Streaming (chunked partitions): month-based folds; trains via train_streaming per fold.
+            - In-memory: uses classic KFold on self.x / self.y with a fresh estimator per fold.
+
+            ``sequential_split``:
+              - False (default): random/shuffled folds (``shuffle=True``, ``random_state=42``).
+              - True: contiguous sequential folds (no shuffle); months stay in discovery order.
+
+            For parquet CV, no prior train* call is needed — pass hyperparameters on Model
+            or via this method (method args override Model defaults).
+
+            Writes ``cross_validation_metrics.csv`` and ``cross_validation_report.txt``
+            to ``output_metrics_dir`` (defaults to ``Model.output_metrics_dir``).
+
+            Returns: pandas.DataFrame with per-fold metrics and a Mean row.
             """
+            self._print_training_device(context="cross_validation")
             import os, random
             from glob import glob
             import numpy as np
@@ -11234,7 +15080,16 @@ class Model:
             from torch.utils.data import DataLoader
             from sklearn.metrics import r2_score, mean_squared_error
             from tqdm.auto import tqdm
-    
+
+            shuffle_folds = not bool(sequential_split)
+            fold_random_state = 42 if shuffle_folds else None
+
+            cv_output_dir = (
+                output_metrics_dir
+                or train_kwargs.pop("output_metrics_dir", None)
+                or getattr(self, "output_metrics_dir", None)
+                or "./results_monitor"
+            )
             # ---------- Helper: dataset & loaders without scaler ----------
             class ParquetMonthBatches(torch.utils.data.IterableDataset):
                 def __init__(
@@ -11340,6 +15195,26 @@ class Model:
                 r2 = float(r2_score(y_true, y_pred))
                 return rmse, r2
     
+            # ---------- SINGLE PARQUET FILE PATH (uses Model.single_parquet_path) ----------
+            if getattr(self, "single_parquet_path", None):
+                if self.model_name in [
+                    'catboost', 'xgboost', 'xgb', 'random_forest', 'decision_tree',
+                    'gradient_boosting', 'linear_regression', 'svm', 'adaboost',
+                ]:
+                    return self._cross_validation_single_parquet_kfold(
+                        k,
+                        target_column_name=target_column_name,
+                        exclude_cols=exclude_cols,
+                        shuffle=shuffle_folds,
+                        random_state=fold_random_state,
+                        output_metrics_dir=cv_output_dir,
+                        **train_kwargs,
+                    )
+                raise ValueError(
+                    f"cross_validation with single_parquet_path does not support "
+                    f"model_name='{self.model_name}'."
+                )
+
             # ---------- COMMON SETUP FOR STREAMING MODE ----------
             parquet_mode = getattr(self, "_parquet_mode", False) or (parquet_root is not None)
             if parquet_mode:
@@ -11380,9 +15255,10 @@ class Model:
                     raise ValueError("Not enough non-empty month partitions to perform CV (need at least 2).")
     
                 # Make k folds over months
-                rnd = random.Random(42)
                 keys = month_keys_all[:]
-                rnd.shuffle(keys)
+                if shuffle_folds:
+                    rnd = random.Random(42)
+                    rnd.shuffle(keys)
                 folds = np.array_split(keys, k)
     
                 # infer input dim by peeking one batch from a temporary loader
@@ -11394,7 +15270,8 @@ class Model:
     
                 # ---------- STREAMING PATH FOR TABFORMER ----------
                 if self.model_name == 'tabformer':
-                    fold_ids, r2_results, rmse_results = [], [], []
+                    fold_rows = []
+                    fold_detail_blocks = []
                     
                     # loop folds
                     for fold_idx in range(k):
@@ -11431,23 +15308,39 @@ class Model:
                         )
     
                         # Evaluate on held-out months
-                        rmse, r2 = _eval_loader_tabformer(m, val_loader, device)
-                        if rmse is None or r2 is None:
+                        metrics = self._loader_prediction_metrics(
+                            m, val_loader, tabformer=True, device=device
+                        )
+                        if metrics is None:
                             continue
-    
-                        fold_ids.append(fold_idx + 1)
-                        r2_results.append(r2)
-                        rmse_results.append(rmse)
-    
-                    # Summarize
-                    df = pd.DataFrame({"Fold": fold_ids, "R2": r2_results, "RMSE": rmse_results})
+
+                        fold_num = fold_idx + 1
+                        fold_rows.append({"Fold": fold_num, **metrics})
+                        if "RMSE" in metrics and "R2" in metrics:
+                            fold_detail_blocks.append(
+                                (
+                                    f"Fold {fold_num}",
+                                    f"R2={metrics['R2']}\nRMSE={metrics['RMSE']}\n",
+                                )
+                            )
+
+                    df = pd.DataFrame(fold_rows)
                     if not df.empty:
-                        df.loc["Mean"] = {"Fold": "Mean", "R2": df["R2"].mean(), "RMSE": df["RMSE"].mean()}
+                        df = self._append_cv_mean_row(df)
+                    self._write_cv_outputs(
+                        df,
+                        mode="partitioned_parquet_tabformer",
+                        k=k,
+                        fold_detail_blocks=fold_detail_blocks,
+                        output_metrics_dir=cv_output_dir,
+                        extra_config={"parquet_root": root},
+                    )
                     return df
                 
                 # ---------- STREAMING PATH FOR CLASSIC ML MODELS ----------
                 elif self.model_name in ['catboost', 'xgboost', 'random_forest', 'decision_tree', 'gradient_boosting', 'linear_regression', 'svm', 'adaboost']:
-                    fold_ids, r2_results, rmse_results = [], [], []
+                    fold_rows = []
+                    fold_detail_blocks = []
                     
                     print(f"Running {k}-fold cross-validation for {self.model_name} in streaming mode")
                     
@@ -11480,18 +15373,30 @@ class Model:
                         )
     
                         # Evaluate on held-out months
-                        rmse, r2 = _eval_loader_ml(m, val_loader)
-                        if rmse is None or r2 is None:
+                        metrics = self._loader_prediction_metrics(m, val_loader)
+                        if metrics is None:
                             continue
-    
-                        fold_ids.append(fold_idx + 1)
-                        r2_results.append(r2)
-                        rmse_results.append(rmse)
-    
-                    # Summarize
-                    df = pd.DataFrame({"Fold": fold_ids, "R2": r2_results, "RMSE": rmse_results})
+
+                        fold_num = fold_idx + 1
+                        fold_rows.append({"Fold": fold_num, **metrics})
+                        fold_detail_blocks.append(
+                            (
+                                f"Fold {fold_num}",
+                                "\n".join(f"{mk}={mv}" for mk, mv in metrics.items()) + "\n",
+                            )
+                        )
+
+                    df = pd.DataFrame(fold_rows)
                     if not df.empty:
-                        df.loc["Mean"] = {"Fold": "Mean", "R2": df["R2"].mean(), "RMSE": df["RMSE"].mean()}
+                        df = self._append_cv_mean_row(df)
+                    self._write_cv_outputs(
+                        df,
+                        mode="partitioned_parquet_ml",
+                        k=k,
+                        fold_detail_blocks=fold_detail_blocks,
+                        output_metrics_dir=cv_output_dir,
+                        extra_config={"parquet_root": root},
+                    )
                     return df
     
             # ---------- IN-MEMORY PATH FOR TABFORMER ----------
@@ -11510,8 +15415,9 @@ class Model:
                 X_all = self.x
                 y_all = self.y
     
-                kf = KFold(n_splits=k, shuffle=True, random_state=42)
-                fold_ids, r2_results, rmse_results = [], [], []
+                kf = KFold(n_splits=k, shuffle=shuffle_folds, random_state=fold_random_state)
+                fold_rows = []
+                fold_detail_blocks = []
     
                 for fold_num, (train_idx, test_idx) in enumerate(tqdm(kf.split(X_all), total=k, desc="CV Folds"), start=1):
                     X_train, X_test = X_all[train_idx], X_all[test_idx]
@@ -11565,15 +15471,26 @@ class Model:
     
                     y_test_pred = torch.cat(test_preds, dim=0).numpy().reshape(-1)
                     y_test_true = torch.cat(test_targets, dim=0).numpy().reshape(-1)
-    
-                    mse  = mean_squared_error(y_test_true, y_test_pred)
-                    rmse = float(np.sqrt(mse))
-                    r2   = r2_score(y_test_true, y_test_pred)
-    
-                    fold_ids.append(fold_num); r2_results.append(r2); rmse_results.append(rmse)
-    
-                df = pd.DataFrame({"Fold": fold_ids, "R2": r2_results, "RMSE": rmse_results})
-                df.loc["Mean"] = {"Fold": "Mean", "R2": df["R2"].mean(), "RMSE": df["RMSE"].mean()}
+
+                    metrics = self._compute_cv_regression_metrics(y_test_true, y_test_pred)
+                    fold_rows.append({"Fold": fold_num, **metrics})
+                    fold_detail_blocks.append(
+                        (
+                            f"Fold {fold_num}",
+                            self._format_split_metrics(y_test_true, y_test_pred, "r"),
+                        )
+                    )
+
+                df = pd.DataFrame(fold_rows)
+                if not df.empty:
+                    df = self._append_cv_mean_row(df)
+                self._write_cv_outputs(
+                    df,
+                    mode="in_memory_tabformer",
+                    k=k,
+                    fold_detail_blocks=fold_detail_blocks,
+                    output_metrics_dir=cv_output_dir,
+                )
                 return df
     
             # ---------- IN-MEMORY PATH FOR CLASSIC ML MODELS ----------
@@ -11582,13 +15499,30 @@ class Model:
                 from sklearn.model_selection import cross_val_score, cross_validate
                 import numpy as np
                 result = DataFrame()
+
+                if getattr(self, "x", None) is None or getattr(self, "y", None) is None:
+                    raise ValueError(
+                        "cross_validation requires in-memory data (self.x/self.y), "
+                        "Model(single_parquet_path=...), or parquet_root."
+                    )
+
+                estimator = self._build_cv_estimator(
+                    self._get_cv_train_config(
+                        target_column_name=target_column_name,
+                        exclude_cols=exclude_cols,
+                        **train_kwargs,
+                    )
+                )
                 
                 # Add fold numbers
                 result.add_column('Folds', [i for i in range(1, k+1)])
                 
                 if self.__task == 'c':  # Classification task
-                    # Stratified K-Fold with shuffling for classification
-                    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
+                    skf = StratifiedKFold(
+                        n_splits=k,
+                        shuffle=shuffle_folds,
+                        random_state=fold_random_state,
+                    )
 
                     unique_classes = np.unique(self.y)
                     if len(unique_classes) == 2:  # Binary classification
@@ -11599,7 +15533,7 @@ class Model:
                             'f1': 'f1',
                             'roc_auc': 'roc_auc',
                         }
-                        cv_scores = cross_validate(self.__model, self.x, self.y, cv=skf, scoring=scoring)
+                        cv_scores = cross_validate(estimator, self.x, self.y, cv=skf, scoring=scoring)
                         result.add_column('Accuracy', cv_scores['test_accuracy'])
                         result.add_column('Precision', cv_scores['test_precision'])
                         result.add_column('Recall', cv_scores['test_recall'])
@@ -11613,25 +15547,27 @@ class Model:
                             'recall': 'recall_weighted',
                             'f1': 'f1_weighted',
                         }
-                        cv_scores = cross_validate(self.__model, self.x, self.y, cv=skf, scoring=scoring)
+                        cv_scores = cross_validate(estimator, self.x, self.y, cv=skf, scoring=scoring)
                         result.add_column('Accuracy', cv_scores['test_accuracy'])
                         result.add_column('Precision', cv_scores['test_precision'])
                         result.add_column('Recall', cv_scores['test_recall'])
                         result.add_column('F1', cv_scores['test_f1'])
                 
-                else:  # Regression task (keep original code)
-                    # K-Fold with shuffling for regression
-                    kf = KFold(n_splits=k, shuffle=True, random_state=42)
-
-                    r2_results = cross_val_score(self.__model, self.x, self.y, cv=kf, scoring='r2')
-                    try:
-                        rmse_neg = cross_val_score(self.__model, self.x, self.y, cv=kf, scoring='neg_root_mean_squared_error')
-                        rmse_results = -rmse_neg
-                    except ValueError:
-                        mse_neg = cross_val_score(self.__model, self.x, self.y, cv=kf, scoring='neg_mean_squared_error')
-                        rmse_results = np.sqrt(-mse_neg)
-                    result.add_column('R2', r2_results)
-                    result.add_column('RMSE', rmse_results)
+                else:  # Regression task
+                    kf = KFold(
+                        n_splits=k,
+                        shuffle=shuffle_folds,
+                        random_state=fold_random_state,
+                    )
+                    scoring = {
+                        'r2': 'r2',
+                        'rmse': 'neg_root_mean_squared_error',
+                        'mae': 'neg_mean_absolute_error',
+                    }
+                    cv_scores = cross_validate(estimator, self.x, self.y, cv=kf, scoring=scoring)
+                    result.add_column('R2', cv_scores['test_r2'])
+                    result.add_column('RMSE', -cv_scores['test_rmse'])
+                    result.add_column('MAE', -cv_scores['test_mae'])
 
                 # Add mean row
                 cols = result.get_columns_names()
@@ -11643,6 +15579,14 @@ class Model:
                 result.add_row(mean_row)
                 
                 result.show()
+                pdf = self._cv_dataframe_to_pandas(result)
+                self._write_cv_outputs(
+                    pdf,
+                    mode="in_memory_ml",
+                    k=k,
+                    output_metrics_dir=cv_output_dir,
+                    extra_config={"n_samples": int(len(self.x)) if hasattr(self.x, "__len__") else None},
+                )
                 return result
 
     def best_model(self):
@@ -13296,7 +17240,11 @@ class Model:
 
         # ── 3. Normalize & invert error metrics ────────────────────────
         def _normalize_invert_errors(metrics_list: list, keys: list) -> list:
-            """Return per-model dicts of final (inverted, normalised) error scores."""
+            """Return per-model dicts of final (inverted, normalised) error scores.
+
+            RAE (when present in error_metrics_list) uses the same min-max + invert
+            path as other error metrics — raw RAE is used, not 1-RAE.
+            """
             col_vals = {k: [m[k] for m in metrics_list] for k in keys}
             col_min  = {k: min(v) for k, v in col_vals.items()}
             col_max  = {k: max(v) for k, v in col_vals.items()}
@@ -13323,7 +17271,10 @@ class Model:
             return result
 
         def _normalize_skill(metrics_list: list, keys: list) -> list:
-            """Per-metric min-max normalise raw skill values across models -> [0,1]."""
+            """Per-metric min-max normalise raw skill values across models -> [0,1].
+
+            When RAE is in skill_metrics_list, use 1-RAE directly (higher is better).
+            """
             col_vals = {k: [m[k] for m in metrics_list] for k in keys}
             col_min  = {k: min(v) for k, v in col_vals.items()}
             col_max  = {k: max(v) for k, v in col_vals.items()}
@@ -13331,6 +17282,10 @@ class Model:
             for m in metrics_list:
                 d = {}
                 for k in keys:
+                    if k == "RAE":
+                        raw = 1.0 - float(m[k])
+                        d[k] = max(0.0, min(1.0, raw))
+                        continue
                     mn, mx = col_min[k], col_max[k]
                     d[k] = 1.0 if mx == mn else (m[k] - mn) / (mx - mn)
                 result.append(d)
@@ -13528,11 +17483,12 @@ class Model:
             "-" * 60,
             "Skill metrics used  : " + ", ".join(SKILL_KEYS),
             "  -> Per-metric min-max normalised across models -> [0, 1].",
+            "  -> If RAE is in skill_metrics_list, score = 1-RAE (clamped to [0, 1]).",
             "  -> Mean Skill Score = arithmetic mean of those normalised values.",
             "",
             "Error metrics used  : " + ", ".join(ERROR_KEYS),
             "  -> PBIAS is taken as |PBIAS| before normalisation.",
-            "  -> Each metric is first min-max normalised across all models:",
+            "  -> Each metric (including RAE if listed here) is min-max normalised:",
             "       normalised = (value - min) / (max - min)",
             "     then inverted so that higher means better performance:",
             "       final_score = 1 - normalised",
@@ -13550,7 +17506,7 @@ class Model:
         ]
         # Scores are computed from pre-floor normalised values (more meaningful)
         score_data = []
-        for ns, ne, name in zip(normalized_skill, normalized_errors, model_names):
+        for i, (ns, ne, name) in enumerate(zip(normalized_skill, normalized_errors, model_names)):
             mean_skill = sum(ns[k] for k in SKILL_KEYS) / len(SKILL_KEYS)
             mean_error = sum(ne[k] for k in ERROR_KEYS) / len(ERROR_KEYS)
             overall    = (mean_skill + mean_error) / 2.0
@@ -13560,6 +17516,14 @@ class Model:
             summary_lines.append(f"  Mean Skill Score  (R2/R/NSE/KGE avg)  : {mean_skill:.4f}")
             summary_lines.append(f"  Mean Error Score  (norm-inv avg)       : {mean_error:.4f}")
             summary_lines.append(f"  Overall Score     (average of above)   : {overall:.4f}")
+            raw_vals = all_metrics[i]
+            summary_lines.append("  Per-metric values (raw -> normalized pre-floor):")
+            summary_lines.append("    Skill:")
+            for k in SKILL_KEYS:
+                summary_lines.append(f"      {k}: {raw_vals[k]:.6g} -> {ns[k]:.4f}")
+            summary_lines.append("    Error:")
+            for k in ERROR_KEYS:
+                summary_lines.append(f"      {k}: {raw_vals[k]:.6g} -> {ne[k]:.4f}")
             summary_lines.append("")
 
         # ranking

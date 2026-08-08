@@ -1,5 +1,11 @@
-from .gis import GIS # from .gis import GIS in production
-from .csm_aqua import CSM # from .csm_aqua import CSM in production
+from gis import GIS # from .gis import GIS in production
+from csm_aqua import CSM # from .csm_aqua import CSM in production
+try:
+    from .gis import GIS
+    from .csm_aqua import CSM
+except ImportError:
+    from gis import GIS
+    from csm_aqua import CSM
 import imp
 import gymnasium as gym
 from matplotlib import pyplot as plt

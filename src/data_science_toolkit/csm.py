@@ -1,5 +1,10 @@
-from .dataframe import DataFrame # from .dataframe import DataFrame in production
-from .chart import Chart # from .chart import Chart in production
+try:
+    from .dataframe import DataFrame
+    from .chart import Chart
+except ImportError:
+    from dataframe import DataFrame
+    from chart import Chart
+    
 from math import exp
 import numpy as np
 import matplotlib.pyplot as plt

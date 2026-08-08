@@ -1,5 +1,11 @@
-from .rl import * # from .rl import * in production
-from .r3 import R3 # from .r3 import R3 in production
+from rl import * # from .rl import * in production
+from r3 import R3 # from .r3 import R3 in production
+try:
+    from .rl import *
+    from .r3 import R3
+except ImportError:
+    from rl import *
+    from r3 import R3
 import time
 import os
 import re
